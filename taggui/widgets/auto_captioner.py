@@ -177,6 +177,11 @@ class CaptionSettingsForm(QVBoxLayout):
         self.max_tags_per_person_spin_box = FocusedScrollSettingsSpinBox(
             key='max_tags_per_person', default=50, minimum=5, maximum=200)
 
+        # Use nested form layout for WD Tagger model dropdown (label on top)
+        wd_model_form = QFormLayout()
+        wd_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        wd_model_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.wd_model_combo_box = FocusedScrollSettingsComboBox(
             key='wd_model')
         self.wd_model_combo_box.setEditable(True)
@@ -184,6 +189,7 @@ class CaptionSettingsForm(QVBoxLayout):
         wd_models = [m for m in MODELS if 'wd' in m.lower() and 'tagger' in m.lower()]
         self.wd_model_combo_box.addItems(wd_models)
         self.wd_model_combo_box.setCurrentText('SmilingWolf/wd-eva02-large-tagger-v3')
+        wd_model_form.addRow('WD Tagger model', self.wd_model_combo_box)
 
         multi_person_settings_form.addRow('Detection confidence',
                                           self.detection_confidence_spin_box)
@@ -201,22 +207,29 @@ class CaptionSettingsForm(QVBoxLayout):
                                           self.max_scene_tags_spin_box)
         multi_person_settings_form.addRow('Maximum tags per person',
                                           self.max_tags_per_person_spin_box)
-        multi_person_settings_form.addRow('WD Tagger model',
-                                          self.wd_model_combo_box)
+        multi_person_settings_form.addRow(wd_model_form)
 
         # Also add WD Tagger min_probability and max_tags for multi-person
         self.mp_min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='mp_wd_tagger_min_probability', default=0.35, minimum=0.01,
             maximum=1)
         self.mp_min_probability_spin_box.setSingleStep(0.01)
+
+        # Use nested form layout for full-width tags to exclude field
+        mp_tags_to_exclude_form = QFormLayout()
+        mp_tags_to_exclude_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapAllRows)
+        mp_tags_to_exclude_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mp_tags_to_exclude_text_edit = SettingsPlainTextEdit(
             key='mp_wd_tagger_tags_to_exclude')
         set_text_edit_height(self.mp_tags_to_exclude_text_edit, 4)
+        mp_tags_to_exclude_form.addRow('Tags to exclude',
+                                       self.mp_tags_to_exclude_text_edit)
 
         multi_person_settings_form.addRow('Tag confidence threshold',
                                           self.mp_min_probability_spin_box)
-        multi_person_settings_form.addRow('Tags to exclude',
-                                          self.mp_tags_to_exclude_text_edit)
+        multi_person_settings_form.addRow(mp_tags_to_exclude_form)
 
         self.toggle_advanced_settings_form_button = TallPushButton(
             'Show Advanced Settings')

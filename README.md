@@ -108,6 +108,51 @@ separated by commas.
 Many of the other generation parameters are described in the
 [Hugging Face documentation](https://huggingface.co/docs/transformers/main/en/main_classes/text_generation#transformers.GenerationConfig).
 
+### Multi-person tagging
+
+The `multi-person-wd-yolo` model is a specialised captioning model that detects multiple people in images and generates separate tags for each person plus scene tags. This is particularly useful for images containing multiple individuals where you want to identify attributes for each person separately.
+
+**How it works:**
+1. Detects people using YOLOv8 object detection
+2. Crops and tags each detected person individually using WD Tagger
+3. Tags the full image and extracts scene/environment tags
+4. Formats output as structured text with person and scene sections
+
+**Example output:**
+
+<img src='samples/2_people/pexels-sebastian-3149285.jpg' alt='Sample 2 Person Image' width='50%'>
+
+```
+person1: 1girl, solo, long hair, shirt, from behind, outdoors, bracelet, bag, ocean, jewelry, standing, short sleeves, beach, sandals, facing away
+person2: 1girl, solo, sandals, bag, from behind, long hair, beach, outdoors, dress, anklet, jewelry, shoulder bag, walking, evening, facing away
+scene: outdoors, beach, ocean, scenery, sunset
+```
+<img src='samples/many_people/pexels-gustavo-fring-3984828.jpg' alt='Sample 2 Person Image' width='50%'>
+
+```
+person1: microphone, holding microphone, realistic, facial hair, male focus, jacket, holding, black jacket, pants, black pants, 1boy, shirt, beard, belt, white shirt
+person2: 1girl, dress, microphone, photorealistic, brown hair, high heels, realistic, long hair, solo, side slit, black dress, holding, full body, wavy hair, curly hair
+person3: instrument, 1boy, male focus, facial hair, guitar, solo, black jacket, pants, black footwear, black pants, music, holding instrument, playing instrument, jacket, black shirt
+person4: guitar, 1boy, instrument, dark-skinned male, dark skin, male focus, holding instrument, black jacket, black pants, jacket, very short hair, holding, buzz cut, pants, black footwear
+person5: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie, formal, holding, black suit, pants, bow
+```
+
+**Multi-person parameters:**
+
+- `Detection confidence`: Minimum confidence threshold for person detection (0.1-1.0). Higher values detect fewer but more certain people. Default: 0.5
+- `Minimum person size`: Minimum size in pixels for detected people. Filters out very small detections. Default: 50px
+- `Maximum people`: Maximum number of people to detect and tag. Default: 10
+- `Crop padding`: Padding in pixels around each detected person when cropping. Default: 10px
+- `YOLO model size`: Size of the YOLOv8 model (n/s/m/l/x). Larger models are more accurate but slower. Default: m
+- `Include scene tags`: Whether to include scene/environment tags in output. Default: enabled
+- `Maximum scene tags`: Maximum number of scene tags to include. Default: 20
+- `Maximum tags per person`: Maximum number of tags to generate for each person. Default: 50
+- `WD Tagger model`: Which WD Tagger model to use for tagging (same options as standard WD Tagger)
+- `Tag confidence threshold`: Minimum probability for WD Tagger tags. Default: 0.35
+- `Tags to exclude`: Tags that should not be generated, separated by commas
+
+If no people are detected in an image, the model automatically falls back to standard WD Tagger behaviour, tagging the entire image normally.
+
 ## Advanced Image List Filtering
 
 The basic functionality of filtering for images that contain a certain tag is

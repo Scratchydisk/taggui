@@ -1,0 +1,3 @@
+person1: 1girl, 1boy, dark skin, jewelry, ring, dress, bracelet, smile, dark-skinned female, realistic, looking at viewer, solo focus, bald
+person2: crown, wristwatch, watch, ring, jewelry, 1boy, dark skin, dress, patterned clothing, bracelet, long sleeves, standing, solo focus, male focus, looking to the side
+scene: couch
