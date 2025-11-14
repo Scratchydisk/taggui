@@ -71,6 +71,18 @@ class MultiPersonTagger(AutoCaptioningModel):
             return 'Maximum people must be at least 1'
         return None
 
+    def load_processor_and_model(self):
+        """
+        Override parent to always initialize components.
+
+        Multi-person tagger has component instances that must be initialized
+        for each model instance, even if model caching is enabled.
+        """
+        # Always initialize components (don't use parent's caching)
+        logger.info("Initializing multi-person tagger components...")
+        self.processor = self.get_processor()
+        self.model = self.get_model()
+
     def get_processor(self):
         """No processor needed for WD Tagger-based models."""
         return None
