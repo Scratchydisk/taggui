@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
                                QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
+from auto_captioning.models.multi_person_tagger import MultiPersonTagger
 from auto_captioning.models.wd_tagger import WdTagger
 from auto_captioning.models_list import MODELS, get_model_class
 from dialogs.caption_multiple_images_dialog import CaptionMultipleImagesDialog
@@ -141,6 +142,82 @@ class CaptionSettingsForm(QVBoxLayout):
         wd_tagger_settings_form.addRow('Maximum tags', self.max_tags_spin_box)
         wd_tagger_settings_form.addRow(tags_to_exclude_form)
 
+        # Multi-person tagger settings
+        self.multi_person_settings_form_container = QWidget()
+        multi_person_settings_form = QFormLayout(
+            self.multi_person_settings_form_container)
+        multi_person_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        multi_person_settings_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.detection_confidence_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='detection_confidence', default=0.5, minimum=0.1, maximum=1.0)
+        self.detection_confidence_spin_box.setSingleStep(0.05)
+
+        self.detection_min_size_spin_box = FocusedScrollSettingsSpinBox(
+            key='detection_min_size', default=50, minimum=10, maximum=500)
+
+        self.detection_max_people_spin_box = FocusedScrollSettingsSpinBox(
+            key='detection_max_people', default=10, minimum=1, maximum=50)
+
+        self.crop_padding_spin_box = FocusedScrollSettingsSpinBox(
+            key='crop_padding', default=10, minimum=0, maximum=100)
+
+        self.yolo_model_size_combo_box = FocusedScrollSettingsComboBox(
+            key='yolo_model_size')
+        self.yolo_model_size_combo_box.addItems(['n', 's', 'm', 'l', 'x'])
+        self.yolo_model_size_combo_box.setCurrentText('m')
+
+        self.include_scene_tags_check_box = SettingsBigCheckBox(
+            key='include_scene_tags', default=True)
+
+        self.max_scene_tags_spin_box = FocusedScrollSettingsSpinBox(
+            key='max_scene_tags', default=20, minimum=1, maximum=100)
+
+        self.max_tags_per_person_spin_box = FocusedScrollSettingsSpinBox(
+            key='max_tags_per_person', default=50, minimum=5, maximum=200)
+
+        self.wd_model_combo_box = FocusedScrollSettingsComboBox(
+            key='wd_model')
+        self.wd_model_combo_box.setEditable(True)
+        # Add WD Tagger models to dropdown
+        wd_models = [m for m in MODELS if 'wd' in m.lower() and 'tagger' in m.lower()]
+        self.wd_model_combo_box.addItems(wd_models)
+        self.wd_model_combo_box.setCurrentText('SmilingWolf/wd-eva02-large-tagger-v3')
+
+        multi_person_settings_form.addRow('Detection confidence',
+                                          self.detection_confidence_spin_box)
+        multi_person_settings_form.addRow('Minimum person size (px)',
+                                          self.detection_min_size_spin_box)
+        multi_person_settings_form.addRow('Maximum people',
+                                          self.detection_max_people_spin_box)
+        multi_person_settings_form.addRow('Crop padding (px)',
+                                          self.crop_padding_spin_box)
+        multi_person_settings_form.addRow('YOLO model size',
+                                          self.yolo_model_size_combo_box)
+        multi_person_settings_form.addRow('Include scene tags',
+                                          self.include_scene_tags_check_box)
+        multi_person_settings_form.addRow('Maximum scene tags',
+                                          self.max_scene_tags_spin_box)
+        multi_person_settings_form.addRow('Maximum tags per person',
+                                          self.max_tags_per_person_spin_box)
+        multi_person_settings_form.addRow('WD Tagger model',
+                                          self.wd_model_combo_box)
+
+        # Also add WD Tagger min_probability and max_tags for multi-person
+        self.mp_min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='mp_wd_tagger_min_probability', default=0.35, minimum=0.01,
+            maximum=1)
+        self.mp_min_probability_spin_box.setSingleStep(0.01)
+        self.mp_tags_to_exclude_text_edit = SettingsPlainTextEdit(
+            key='mp_wd_tagger_tags_to_exclude')
+        set_text_edit_height(self.mp_tags_to_exclude_text_edit, 4)
+
+        multi_person_settings_form.addRow('Tag confidence threshold',
+                                          self.mp_min_probability_spin_box)
+        multi_person_settings_form.addRow('Tags to exclude',
+                                          self.mp_tags_to_exclude_text_edit)
+
         self.toggle_advanced_settings_form_button = TallPushButton(
             'Show Advanced Settings')
 
@@ -216,6 +293,7 @@ class CaptionSettingsForm(QVBoxLayout):
 
         self.addLayout(basic_settings_form)
         self.addWidget(self.wd_tagger_settings_form_container)
+        self.addWidget(self.multi_person_settings_form_container)
         self.horizontal_line = HorizontalLine()
         self.addWidget(self.horizontal_line)
         self.addWidget(self.toggle_advanced_settings_form_button)
@@ -263,8 +341,18 @@ class CaptionSettingsForm(QVBoxLayout):
 
     @Slot(str)
     def show_settings_for_model(self, model_id: str):
+        model_class = get_model_class(model_id)
+        is_wd_tagger_model = model_class == WdTagger
+        is_multi_person_model = model_class == MultiPersonTagger
+
+        # WD Tagger specific widgets
         wd_tagger_widgets = [self.wd_tagger_settings_form_container]
-        non_wd_tagger_widgets = [
+
+        # Multi-person tagger specific widgets
+        multi_person_widgets = [self.multi_person_settings_form_container]
+
+        # Common widgets for standard VLM models (not WD Tagger or MultiPerson)
+        vlm_widgets = [
             self.prompt_label,
             self.prompt_text_edit,
             self.caption_start_label,
@@ -277,18 +365,23 @@ class CaptionSettingsForm(QVBoxLayout):
             self.toggle_advanced_settings_form_button,
             self.advanced_settings_form_container
         ]
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
+
+        # Show/hide based on model type
         for widget in wd_tagger_widgets:
             widget.setVisible(is_wd_tagger_model)
-        for widget in non_wd_tagger_widgets:
-            widget.setVisible(not is_wd_tagger_model)
+        for widget in multi_person_widgets:
+            widget.setVisible(is_multi_person_model)
+        for widget in vlm_widgets:
+            widget.setVisible(not is_wd_tagger_model and not is_multi_person_model)
+
         self.set_load_in_4_bit_visibility(self.device_combo_box.currentText())
 
     @Slot(str)
     def set_load_in_4_bit_visibility(self, device: str):
         model_id = self.model_combo_box.currentText()
-        is_wd_tagger_model = get_model_class(model_id) == WdTagger
-        if is_wd_tagger_model:
+        model_class = get_model_class(model_id)
+        # WD Tagger and MultiPersonTagger don't support 4-bit quantization
+        if model_class in (WdTagger, MultiPersonTagger):
             self.load_in_4_bit_container.setVisible(False)
             return
         is_load_in_4_bit_available = (self.is_bitsandbytes_available
@@ -339,7 +432,20 @@ class CaptionSettingsForm(QVBoxLayout):
                 'max_tags': self.max_tags_spin_box.value(),
                 'tags_to_exclude':
                     self.tags_to_exclude_text_edit.toPlainText()
-            }
+            },
+            # Multi-person tagger settings
+            'detection_confidence': self.detection_confidence_spin_box.value(),
+            'detection_min_size': self.detection_min_size_spin_box.value(),
+            'detection_max_people': self.detection_max_people_spin_box.value(),
+            'crop_padding': self.crop_padding_spin_box.value(),
+            'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
+            'include_scene_tags': self.include_scene_tags_check_box.isChecked(),
+            'max_scene_tags': self.max_scene_tags_spin_box.value(),
+            'max_tags_per_person': self.max_tags_per_person_spin_box.value(),
+            'wd_model': self.wd_model_combo_box.currentText(),
+            'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
+            'mp_wd_tagger_tags_to_exclude':
+                self.mp_tags_to_exclude_text_edit.toPlainText()
         }
 
 

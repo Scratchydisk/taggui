@@ -49,8 +49,13 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.max_scene_tags = caption_settings.get('max_scene_tags', 20)
         self.max_tags_per_person = caption_settings.get('max_tags_per_person', 50)
 
-        # WD Tagger settings
-        self.wd_tagger_settings = caption_settings.get('wd_tagger_settings', {})
+        # WD Tagger settings (construct from mp_ prefixed settings)
+        self.wd_tagger_settings = {
+            'show_probabilities': False,  # Not shown in console for multi-person
+            'min_probability': caption_settings.get('mp_wd_tagger_min_probability', 0.35),
+            'max_tags': self.max_tags_per_person,  # Use max_tags_per_person
+            'tags_to_exclude': caption_settings.get('mp_wd_tagger_tags_to_exclude', '')
+        }
         self.wd_model_id = caption_settings.get('wd_model', 'SmilingWolf/wd-eva02-large-tagger-v3')
 
         # Components (initialized in get_model)
