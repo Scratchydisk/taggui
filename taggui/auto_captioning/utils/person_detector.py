@@ -1,0 +1,216 @@
+"""
+Person detection utility using YOLOv8.
+
+Provides person detection and cropping functionality for multi-person tagging.
+"""
+
+import logging
+from pathlib import Path
+from typing import List, Dict
+
+import torch
+from PIL import Image
+from ultralytics import YOLO
+
+
+logger = logging.getLogger(__name__)
+
+
+class PersonDetector:
+    """
+    Wrapper for YOLOv8 person detection.
+
+    Detects people in images, filters by confidence and size, and provides
+    cropping functionality for detected bounding boxes.
+    """
+
+    def __init__(
+        self,
+        model_size: str = 'm',
+        device: str = None,
+        conf_threshold: float = 0.5,
+        min_size: int = 50,
+        max_people: int = 10
+    ):
+        """
+        Initialise the person detector.
+
+        Args:
+            model_size: YOLO model size (n, s, m, l, x). Default: 'm' (medium)
+            device: Device to run on ('cuda' or 'cpu'). Auto-detected if None.
+            conf_threshold: Confidence threshold for detections (0.0-1.0)
+            min_size: Minimum bounding box dimension (width or height) in pixels
+            max_people: Maximum number of people to detect per image
+        """
+        # Device selection
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = device
+
+        # Detection parameters
+        self.conf_threshold = conf_threshold
+        self.min_size = min_size
+        self.max_people = max_people
+
+        # Load YOLOv8 model
+        logger.info(f"Loading YOLOv8{model_size} on {device}...")
+        try:
+            model_name = f"yolov8{model_size}.pt"
+            self.model = YOLO(model_name)
+            self.model.to(device)
+            logger.info(f"YOLOv8{model_size} loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load YOLOv8 model: {e}")
+            raise RuntimeError(
+                f"Could not load YOLOv8 model '{model_name}'. "
+                f"The model will be auto-downloaded on first use if not found. "
+                f"Error: {e}"
+            ) from e
+
+    def detect_people(
+        self,
+        image_path: str,
+        conf_threshold: float = None
+    ) -> List[Dict]:
+        """
+        Detect people in an image.
+
+        Args:
+            image_path: Path to image file
+            conf_threshold: Override confidence threshold for this detection.
+                          Uses instance threshold if None.
+
+        Returns:
+            List of detection dictionaries with format:
+            [
+                {
+                    'bbox': [x1, y1, x2, y2],  # Bounding box coordinates
+                    'confidence': float,        # Detection confidence
+                    'area': int,                # Bounding box area
+                    'center_y': int             # Vertical center position
+                },
+                ...
+            ]
+            Sorted by area (largest first), then by center_y (top to bottom).
+            Limited to max_people detections.
+            Returns empty list if no people detected or on error.
+        """
+        if conf_threshold is None:
+            conf_threshold = self.conf_threshold
+
+        try:
+            # Run YOLO detection (class 0 is 'person' in COCO dataset)
+            results = self.model(
+                image_path,
+                conf=conf_threshold,
+                classes=[0],
+                verbose=False  # Suppress YOLO output
+            )
+
+            detections = []
+            for result in results:
+                boxes = result.boxes
+                for box in boxes:
+                    # Extract bounding box coordinates
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = [int(coord) for coord in xyxy]
+
+                    # Calculate dimensions
+                    width = x2 - x1
+                    height = y2 - y1
+
+                    # Filter by minimum size
+                    if width < self.min_size or height < self.min_size:
+                        logger.debug(
+                            f"Filtered detection: size {width}x{height} "
+                            f"< min_size {self.min_size}"
+                        )
+                        continue
+
+                    # Calculate area and center position for sorting
+                    area = width * height
+                    center_y = (y1 + y2) // 2
+
+                    detections.append({
+                        'bbox': [x1, y1, x2, y2],
+                        'confidence': float(box.conf[0]),
+                        'area': area,
+                        'center_y': center_y
+                    })
+
+            # Sort by area (largest first), then by Y position (top to bottom)
+            detections.sort(key=lambda d: (-d['area'], d['center_y']))
+
+            # Limit to max_people
+            if len(detections) > self.max_people:
+                logger.warning(
+                    f"Detected {len(detections)} people, "
+                    f"limiting to {self.max_people}"
+                )
+                detections = detections[:self.max_people]
+
+            logger.info(f"Detected {len(detections)} person(s) in {image_path}")
+            return detections
+
+        except Exception as e:
+            logger.error(f"Error detecting people in {image_path}: {e}")
+            return []
+
+    def crop_person(
+        self,
+        image: Image.Image,
+        bbox: List[int],
+        padding: int = 10
+    ) -> Image.Image:
+        """
+        Crop a person from an image with optional padding.
+
+        Args:
+            image: PIL Image object
+            bbox: Bounding box [x1, y1, x2, y2]
+            padding: Padding around the bbox in pixels
+
+        Returns:
+            Cropped PIL Image
+
+        Raises:
+            ValueError: If bbox is invalid
+        """
+        if len(bbox) != 4:
+            raise ValueError(f"Invalid bbox format: expected 4 values, got {len(bbox)}")
+
+        width, height = image.size
+        x1, y1, x2, y2 = bbox
+
+        # Validate bbox
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError(f"Invalid bbox dimensions: ({x1},{y1},{x2},{y2})")
+
+        # Add padding and clamp to image bounds
+        x1 = max(0, x1 - padding)
+        y1 = max(0, y1 - padding)
+        x2 = min(width, x2 + padding)
+        y2 = min(height, y2 + padding)
+
+        try:
+            cropped = image.crop((x1, y1, x2, y2))
+            logger.debug(f"Cropped person: bbox=({x1},{y1},{x2},{y2})")
+            return cropped
+        except Exception as e:
+            logger.error(f"Error cropping image: {e}")
+            raise
+
+    def get_detection_info(self) -> Dict:
+        """
+        Get current detection configuration.
+
+        Returns:
+            Dictionary with detection parameters
+        """
+        return {
+            'device': self.device,
+            'conf_threshold': self.conf_threshold,
+            'min_size': self.min_size,
+            'max_people': self.max_people,
+            'model': str(self.model.model_name) if hasattr(self.model, 'model_name') else 'unknown'
+        }

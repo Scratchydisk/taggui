@@ -7,10 +7,12 @@ from auto_captioning.models.llava_llama_3 import LlavaLlama3
 from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
                                                LlavaNextVicuna)
 from auto_captioning.models.moondream import Moondream1, Moondream2
+from auto_captioning.models.multi_person_tagger import MultiPersonTagger
 from auto_captioning.models.phi_3_vision import Phi3Vision
 from auto_captioning.models.wd_tagger import WdTagger
 
 MODELS = [
+    'multi-person-wd-yolo',
     'fancyfeast/llama-joycaption-beta-one-hf-llava',
     'microsoft/Florence-2-large-ft',
     'microsoft/Florence-2-large',
@@ -54,6 +56,8 @@ MODELS = [
 
 def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
     lowercase_model_id = model_id.lower()
+    if 'multi-person' in lowercase_model_id:
+        return MultiPersonTagger
     if 'florence' in lowercase_model_id:
         if 'promptgen' in lowercase_model_id:
             return Florence2Promptgen
