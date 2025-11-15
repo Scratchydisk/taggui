@@ -147,7 +147,7 @@ class WdTagger(AutoCaptioningModel):
         return image_array
 
     def generate_caption(self, model_inputs: np.ndarray,
-                         image_prompt: str) -> tuple[str, str]:
+                         image_prompt: str, image=None) -> tuple[str, str]:
         tags, probabilities = self.model.generate_tags(model_inputs,
                                                        self.wd_tagger_settings)
         caption = self.thread.tag_separator.join(tags)

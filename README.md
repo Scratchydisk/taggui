@@ -120,6 +120,8 @@ The `multi-person-wd-yolo` model is a specialised captioning model that detects 
 
 Person detection tends to go left to right, foreground to background, but this isn't a hard and fast rule.
 
+**Privacy note:** The multi-person model temporarily writes each image being processed to the same directory as the source image (as a hidden file: `.taggui_tmp_person_detection_*.png`) for YOLO detection. These files are immediately deleted after processing. This keeps temporary files with your images rather than in shared system directories. 
+
 **Example output:**
 
 <img src='samples/2_people/pexels-sebastian-3149285.jpg' alt='Sample 2 Person Image' width='50%'>

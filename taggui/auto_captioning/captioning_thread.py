@@ -113,7 +113,7 @@ class CaptioningThread(QThread):
                       'not supported or it is a corrupted image.')
                 continue
             caption, console_output_caption = model.generate_caption(
-                model_inputs, image_prompt)
+                model_inputs, image_prompt, image)
             tags = add_caption_to_tags(image.tags, caption, caption_position)
             self.caption_generated.emit(image_index, caption, tags)
             if are_multiple_images_selected:

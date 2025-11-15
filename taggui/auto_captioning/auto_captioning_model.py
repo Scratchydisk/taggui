@@ -298,7 +298,7 @@ class AutoCaptioningModel:
         return caption
 
     def generate_caption(self, model_inputs: BatchFeature | dict | np.ndarray,
-                         image_prompt: str) -> tuple[str, str]:
+                         image_prompt: str, image=None) -> tuple[str, str]:
         generation_model = self.get_generation_model()
         self.tokenizer = self.get_tokenizer()
         bad_words_ids = self.get_bad_words_ids()

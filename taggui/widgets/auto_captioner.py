@@ -1,9 +1,10 @@
 import sys
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image as PilImage, ImageDraw
 from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
+from PySide6.QtGui import QFontMetrics, QImage, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
 from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
                                QDockWidget, QFormLayout, QFrame,
                                QGraphicsPixmapItem, QGraphicsScene,
@@ -259,9 +260,12 @@ class DetectionPreviewDialog(QDialog):
                 self.detection_settings.get('crop_padding', 10)
             )
 
-            # Convert to QPixmap and display in graphics view
-            annotated_image.save('/tmp/detection_preview.png')
-            pixmap = QPixmap('/tmp/detection_preview.png')
+            # Convert PIL Image to QPixmap in memory (no disk I/O)
+            buffer = BytesIO()
+            annotated_image.save(buffer, format='PNG')
+            buffer.seek(0)
+            qimage = QImage.fromData(buffer.getvalue())
+            pixmap = QPixmap.fromImage(qimage)
 
             # Clear and update scene
             self.graphics_scene.clear()

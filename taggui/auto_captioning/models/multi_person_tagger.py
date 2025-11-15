@@ -209,7 +209,8 @@ class MultiPersonTagger(AutoCaptioningModel):
     def generate_caption(
         self,
         model_inputs: PilImage.Image,
-        image_prompt: str
+        image_prompt: str,
+        image=None
     ) -> tuple[str, str]:
         """
         Generate multi-person caption.
@@ -224,6 +225,7 @@ class MultiPersonTagger(AutoCaptioningModel):
         Args:
             model_inputs: PIL Image
             image_prompt: Prompt (unused)
+            image: Optional Image object with path attribute
 
         Returns:
             Tuple of (caption, console_output_caption)
@@ -231,14 +233,26 @@ class MultiPersonTagger(AutoCaptioningModel):
         pil_image = model_inputs
 
         # Save image temporarily for YOLO detection
+        # Use the image's directory if available, otherwise use system temp
         import tempfile
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-            temp_path = tmp_file.name
+        import uuid
+        from pathlib import Path
+
+        if image and hasattr(image, 'path'):
+            # Create temp file in same directory as the image (for privacy)
+            temp_dir = image.path.parent
+            temp_filename = f'.taggui_tmp_person_detection_{uuid.uuid4().hex[:8]}.png'
+            temp_path = temp_dir / temp_filename
             pil_image.save(temp_path)
+        else:
+            # Fall back to system temp directory
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                temp_path = tmp_file.name
+                pil_image.save(temp_path)
 
         try:
             # Step 1: Detect people
-            detections = self.person_detector.detect_people(temp_path)
+            detections = self.person_detector.detect_people(str(temp_path))
 
             # Step 2: If no people detected, fall back to standard WD Tagger
             if not detections:
@@ -313,7 +327,7 @@ class MultiPersonTagger(AutoCaptioningModel):
             # Clean up temporary file
             import os
             try:
-                os.unlink(temp_path)
+                os.unlink(str(temp_path))
             except Exception as e:
                 logger.warning(f"Could not delete temp file {temp_path}: {e}")
 
