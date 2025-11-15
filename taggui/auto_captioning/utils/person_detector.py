@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import List, Dict
 
+import numpy as np
 import torch
 from PIL import Image
 from ultralytics import YOLO
@@ -30,7 +31,8 @@ class PersonDetector:
         device: str = None,
         conf_threshold: float = 0.5,
         min_size: int = 50,
-        max_people: int = 10
+        max_people: int = 10,
+        use_segmentation: bool = False
     ):
         """
         Initialise the person detector.
@@ -41,6 +43,7 @@ class PersonDetector:
             conf_threshold: Confidence threshold for detections (0.0-1.0)
             min_size: Minimum bounding box dimension (width or height) in pixels
             max_people: Maximum number of people to detect per image
+            use_segmentation: Use YOLOv8-seg for instance segmentation. Default: False
         """
         # Device selection
         if device is None:
@@ -51,14 +54,17 @@ class PersonDetector:
         self.conf_threshold = conf_threshold
         self.min_size = min_size
         self.max_people = max_people
+        self.use_segmentation = use_segmentation
 
         # Load YOLOv8 model
-        logger.info(f"Loading YOLOv8{model_size} on {device}...")
+        model_suffix = '-seg' if use_segmentation else ''
+        model_type = 'segmentation' if use_segmentation else 'detection'
+        logger.info(f"Loading YOLOv8{model_size}{model_suffix} ({model_type}) on {device}...")
         try:
-            model_name = f"yolov8{model_size}.pt"
+            model_name = f"yolov8{model_size}{model_suffix}.pt"
             self.model = YOLO(model_name)
             self.model.to(device)
-            logger.info(f"YOLOv8{model_size} loaded successfully")
+            logger.info(f"YOLOv8{model_size}{model_suffix} loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load YOLOv8 model: {e}")
             raise RuntimeError(
@@ -87,7 +93,8 @@ class PersonDetector:
                     'bbox': [x1, y1, x2, y2],  # Bounding box coordinates
                     'confidence': float,        # Detection confidence
                     'area': int,                # Bounding box area
-                    'center_y': int             # Vertical center position
+                    'center_y': int,            # Vertical center position
+                    'mask': np.ndarray or None  # Segmentation mask (HxW bool array) if segmentation enabled
                 },
                 ...
             ]
@@ -110,7 +117,18 @@ class PersonDetector:
             detections = []
             for result in results:
                 boxes = result.boxes
-                for box in boxes:
+                masks = result.masks if self.use_segmentation and hasattr(result, 'masks') and result.masks is not None else None
+
+                # Get original image shape for mask resizing
+                orig_shape = result.orig_shape if hasattr(result, 'orig_shape') else None
+
+                if self.use_segmentation:
+                    if masks is not None:
+                        logger.debug(f"Segmentation enabled: Got {len(masks)} masks for {len(boxes)} boxes, orig_shape={orig_shape}")
+                    else:
+                        logger.warning("Segmentation enabled but no masks returned from YOLO model")
+
+                for box_idx, box in enumerate(boxes):
                     # Extract bounding box coordinates
                     xyxy = box.xyxy[0].cpu().numpy()
                     x1, y1, x2, y2 = [int(coord) for coord in xyxy]
@@ -131,11 +149,37 @@ class PersonDetector:
                     area = width * height
                     center_y = (y1 + y2) // 2
 
+                    # Extract segmentation mask if available
+                    mask = None
+                    if masks is not None and box_idx < len(masks):
+                        try:
+                            # Get mask data as numpy array (HxW)
+                            # For YOLOv8-seg, masks.data contains the mask for each detection
+                            mask_data = masks.data[box_idx].cpu().numpy()
+
+                            # Resize mask to original image dimensions
+                            if orig_shape is not None and mask_data.shape != orig_shape[:2]:
+                                # Convert to PIL Image for resizing
+                                mask_img = Image.fromarray((mask_data * 255).astype(np.uint8))
+                                # Resize to original image dimensions (height, width)
+                                mask_img_resized = mask_img.resize((orig_shape[1], orig_shape[0]), Image.Resampling.BILINEAR)
+                                # Convert back to numpy boolean array
+                                mask = np.array(mask_img_resized) > 127
+                                logger.debug(f"Resized mask from {mask_data.shape} to {mask.shape}")
+                            else:
+                                mask = mask_data > 0.5  # Convert to boolean mask
+
+                            logger.debug(f"Extracted segmentation mask for person {box_idx+1}: shape={mask.shape}")
+                        except Exception as e:
+                            logger.warning(f"Failed to extract mask for detection {box_idx}: {e}")
+                            mask = None
+
                     detections.append({
                         'bbox': [x1, y1, x2, y2],
                         'confidence': float(box.conf[0]),
                         'area': area,
-                        'center_y': center_y
+                        'center_y': center_y,
+                        'mask': mask
                     })
 
             # Sort by area (largest first), then by Y position (top to bottom)

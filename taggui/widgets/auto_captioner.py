@@ -128,6 +128,10 @@ class DetectionPreviewDialog(QDialog):
         # Store data
         self.image_path = None
         self.detection_settings = {}
+        self.settings_form = None  # Reference to parent settings form for refresh
+        self.current_detections = []
+        self.current_image = None
+        self.highlighted_person = None  # Index of highlighted person (None = all)
 
         # Main layout
         layout = QVBoxLayout(self)
@@ -177,6 +181,9 @@ class DetectionPreviewDialog(QDialog):
             QHeaderView.ResizeMode.Stretch
         )
         self.detection_table.setMaximumHeight(150)
+        self.detection_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.detection_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.detection_table.itemSelectionChanged.connect(self.on_person_selected)
         layout.addWidget(self.detection_table)
 
         # Buttons
@@ -214,11 +221,14 @@ class DetectionPreviewDialog(QDialog):
     def update_settings_display(self):
         """Update the settings display label."""
         settings = self.detection_settings
+        mask_status = "enabled" if settings.get('mask_overlapping_people', True) else "disabled"
+        mask_method = settings.get('masking_method', 'Bounding box')
         text = (
             f"Settings: Confidence={settings.get('detection_confidence', 0.5):.2f}, "
             f"MinSize={settings.get('detection_min_size', 50)}px, "
             f"Padding={settings.get('crop_padding', 10)}px, "
-            f"YOLO={settings.get('yolo_model_size', 'm')}"
+            f"YOLO={settings.get('yolo_model_size', 'm')}, "
+            f"Masking={mask_status} ({mask_method})"
         )
         self.settings_label.setText(text)
 
@@ -226,6 +236,20 @@ class DetectionPreviewDialog(QDialog):
         """Run person detection and display results."""
         if not self.image_path:
             return
+
+        # Refresh settings from parent form if available
+        if self.settings_form:
+            self.detection_settings = {
+                'detection_confidence': self.settings_form.detection_confidence_spin_box.value(),
+                'detection_min_size': self.settings_form.detection_min_size_spin_box.value(),
+                'detection_max_people': self.settings_form.detection_max_people_spin_box.value(),
+                'crop_padding': self.settings_form.crop_padding_spin_box.value(),
+                'yolo_model_size': self.settings_form.yolo_model_size_combo_box.currentText(),
+                'mask_overlapping_people': self.settings_form.mask_overlaps_check_box.isChecked(),
+                'masking_method': self.settings_form.masking_method_combo_box.currentText(),
+                'preserve_target_bbox': self.settings_form.preserve_target_bbox_check_box.isChecked(),
+            }
+            self.update_settings_display()
 
         # Ensure loading indicator is shown and button disabled
         if not self.loading_label.isVisible():
@@ -238,13 +262,19 @@ class DetectionPreviewDialog(QDialog):
             # Import here to avoid circular dependencies
             from auto_captioning.utils.person_detector import PersonDetector
 
+            # Determine if segmentation should be used
+            mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
+            masking_method = self.detection_settings.get('masking_method', 'Bounding box')
+            use_segmentation = mask_overlapping and masking_method == 'Segmentation'
+
             # Create PersonDetector with current settings
             detector = PersonDetector(
                 model_size=self.detection_settings.get('yolo_model_size', 'm'),
                 device='cpu',  # Use CPU for preview to avoid GPU memory issues
                 conf_threshold=self.detection_settings.get('detection_confidence', 0.5),
                 min_size=self.detection_settings.get('detection_min_size', 50),
-                max_people=self.detection_settings.get('detection_max_people', 10)
+                max_people=self.detection_settings.get('detection_max_people', 10),
+                use_segmentation=use_segmentation
             )
 
             # Run detection
@@ -253,11 +283,19 @@ class DetectionPreviewDialog(QDialog):
             # Load image
             pil_image = PilImage.open(self.image_path).convert('RGB')
 
-            # Draw bounding boxes
+            # Store for re-drawing when person selected
+            self.current_detections = detections
+            self.current_image = pil_image
+            self.highlighted_person = None  # Reset highlight
+
+            # Draw bounding boxes and masking visualization
             annotated_image = self.draw_detections(
                 pil_image,
                 detections,
-                self.detection_settings.get('crop_padding', 10)
+                self.detection_settings.get('crop_padding', 10),
+                mask_overlapping,
+                masking_method,
+                self.highlighted_person
             )
 
             # Convert PIL Image to QPixmap in memory (no disk I/O)
@@ -278,8 +316,11 @@ class DetectionPreviewDialog(QDialog):
 
             # Update detection count
             count = len(detections)
+            # Check if segmentation masks are present
+            masks_present = any(d.get('mask') is not None for d in detections)
+            mask_info = f" (segmentation masks: {'yes' if masks_present else 'no'})" if use_segmentation else ""
             self.detection_count_label.setText(
-                f"{count} {'person' if count == 1 else 'people'} detected"
+                f"{count} {'person' if count == 1 else 'people'} detected{mask_info}"
             )
 
             # Update table
@@ -294,13 +335,74 @@ class DetectionPreviewDialog(QDialog):
 
         finally:
             # Hide loading indicator and re-enable button
+            self.loading_label.setText("⏳ Running detection, please wait...")  # Reset text
             self.loading_label.hide()
             self.refresh_button.setEnabled(True)
 
-    def draw_detections(self, image: PilImage.Image, detections: list, padding: int) -> PilImage.Image:
-        """Draw bounding boxes and padding on image."""
+    def draw_detections(
+        self,
+        image: PilImage.Image,
+        detections: list,
+        padding: int,
+        mask_overlapping: bool = False,
+        masking_method: str = 'Bounding box',
+        highlighted_person: int = None
+    ) -> PilImage.Image:
+        """Draw bounding boxes, padding, and masking visualization on image.
+
+        Args:
+            highlighted_person: If set, only show masking for this person's crop region
+        """
+        import numpy as np
+
         # Make a copy to draw on
         img_copy = image.copy()
+
+        # If masking is enabled and we have multiple people, show masking visualization
+        if mask_overlapping and len(detections) > 1:
+            # Apply masking visualization for each person
+            img_array = np.array(img_copy)
+
+            # If a person is highlighted, only show masking for that person
+            # Otherwise show masking for all people
+            target_indices = [highlighted_person] if highlighted_person is not None else range(len(detections))
+
+            for target_idx in target_indices:
+                target_detection = detections[target_idx]
+                target_bbox = target_detection['bbox']
+                tx1, ty1, tx2, ty2 = target_bbox
+
+                # Calculate crop region
+                crop_x1 = max(0, tx1 - padding)
+                crop_y1 = max(0, ty1 - padding)
+                crop_x2 = min(img_copy.width, tx2 + padding)
+                crop_y2 = min(img_copy.height, ty2 + padding)
+
+                # For each other person, show what would be masked
+                for other_idx, other_detection in enumerate(detections):
+                    if other_idx == target_idx:
+                        continue
+
+                    if masking_method == 'Segmentation' and 'mask' in other_detection and other_detection['mask'] is not None:
+                        # Use segmentation mask
+                        mask = other_detection['mask']
+                        # Check if mask overlaps with crop region
+                        mask_crop = mask[crop_y1:crop_y2, crop_x1:crop_x2]
+                        if mask_crop.any():
+                            # Semi-transparent grey overlay on masked pixels
+                            img_array[mask] = img_array[mask] * 0.5 + np.array([127, 127, 127]) * 0.5
+                    else:
+                        # Use bounding box
+                        other_bbox = other_detection['bbox']
+                        ox1, oy1, ox2, oy2 = other_bbox
+
+                        # Check if other bbox overlaps with crop region
+                        if not (ox2 < crop_x1 or ox1 > crop_x2 or oy2 < crop_y1 or oy1 > crop_y2):
+                            # Semi-transparent grey overlay on masked region
+                            img_array[oy1:oy2, ox1:ox2] = img_array[oy1:oy2, ox1:ox2] * 0.5 + np.array([127, 127, 127]) * 0.5
+
+            img_copy = PilImage.fromarray(img_array.astype('uint8'))
+
         draw = ImageDraw.Draw(img_copy)
 
         # Color palette for different people (RGB)
@@ -321,9 +423,78 @@ class DetectionPreviewDialog(QDialog):
             bbox = detection['bbox']
             x1, y1, x2, y2 = bbox
             color = colors[i % len(colors)]
+            mask = detection.get('mask')
 
-            # Draw detection bbox (thick line)
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+            # Determine if this is the highlighted person
+            is_highlighted = (highlighted_person is not None and i == highlighted_person)
+
+            # If segmentation mask is available, draw it
+            if mask is not None and mask.shape[0] > 0 and mask.shape[1] > 0:
+                # Create colored overlay showing the segmentation mask
+                img_array = np.array(img_copy)
+
+                # Create a semi-transparent colored overlay
+                overlay = img_array.copy()
+
+                # Fill mask area with the person's color (semi-transparent)
+                overlay[mask] = overlay[mask] * 0.6 + np.array(color) * 0.4
+
+                # Find mask boundary using simple numpy operations
+                # Pad mask to handle edges
+                padded = np.pad(mask, 1, mode='constant', constant_values=False)
+
+                # Detect boundary by checking if any neighbor is False
+                # A pixel is on the boundary if it's True but has at least one False neighbor
+                boundary_pixels = (
+                    padded[1:-1, 1:-1] &  # Current pixel is True
+                    ~(
+                        padded[:-2, 1:-1] &  # Top
+                        padded[2:, 1:-1] &   # Bottom
+                        padded[1:-1, :-2] &  # Left
+                        padded[1:-1, 2:]     # Right
+                    )
+                )
+
+                # Thicken boundary for visibility
+                # Dilate boundary by including neighbors
+                thick_boundary = boundary_pixels.copy()
+                for _ in range(2 if not is_highlighted else 3):
+                    padded_boundary = np.pad(thick_boundary, 1, mode='constant', constant_values=False)
+                    thick_boundary = (
+                        padded_boundary[1:-1, 1:-1] |
+                        padded_boundary[:-2, 1:-1] |
+                        padded_boundary[2:, 1:-1] |
+                        padded_boundary[1:-1, :-2] |
+                        padded_boundary[1:-1, 2:]
+                    )
+
+                # Draw boundary in the person's color
+                if is_highlighted:
+                    # Extra thick boundary with white glow for highlighted
+                    extra_thick = thick_boundary.copy()
+                    for _ in range(2):
+                        padded_extra = np.pad(extra_thick, 1, mode='constant', constant_values=False)
+                        extra_thick = (
+                            padded_extra[1:-1, 1:-1] |
+                            padded_extra[:-2, 1:-1] |
+                            padded_extra[2:, 1:-1] |
+                            padded_extra[1:-1, :-2] |
+                            padded_extra[1:-1, 2:]
+                        )
+                    outer_ring = extra_thick & ~thick_boundary
+                    overlay[outer_ring] = [255, 255, 255]  # White glow
+
+                overlay[thick_boundary] = color  # Main boundary
+
+                img_copy = PilImage.fromarray(overlay.astype('uint8'))
+                draw = ImageDraw.Draw(img_copy)
+            else:
+                # Fall back to bounding box if no mask
+                bbox_width = 8 if is_highlighted else 4
+                if is_highlighted:
+                    # Draw white glow around highlighted bbox
+                    draw.rectangle([x1-2, y1-2, x2+2, y2+2], outline=(255, 255, 255), width=2)
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=bbox_width)
 
             # Draw padding region (thin dashed-like line)
             px1 = max(0, x1 - padding)
@@ -331,16 +502,75 @@ class DetectionPreviewDialog(QDialog):
             px2 = min(img_copy.width, x2 + padding)
             py2 = min(img_copy.height, y2 + padding)
 
-            # Draw padding box with thinner line and lighter color
+            # Draw padding box with thinner line and lighter color (bolder if highlighted)
+            padding_width = 4 if is_highlighted else 2
             padding_color = tuple(min(255, c + 80) for c in color)
-            draw.rectangle([px1, py1, px2, py2], outline=padding_color, width=2)
+            draw.rectangle([px1, py1, px2, py2], outline=padding_color, width=padding_width)
 
-            # Draw person number
-            text = f"Person {i+1}"
+            # Draw person number (larger and bold if highlighted)
+            text = f"Person {i+1}" + (" ★" if is_highlighted else "")
             # Simple text position - top left of bbox
             draw.text((x1 + 5, y1 + 5), text, fill=color)
 
         return img_copy
+
+    def on_person_selected(self):
+        """Handle person selection in detection table."""
+        selected_rows = self.detection_table.selectedItems()
+        if not selected_rows or not self.current_image or not self.current_detections:
+            return
+
+        # Get selected row index
+        row = self.detection_table.currentRow()
+        if row < 0 or row >= len(self.current_detections):
+            return
+
+        # Show loading indicator
+        self.loading_label.setText(f"⏳ Updating preview for Person {row+1}...")
+        self.loading_label.show()
+        self.detection_table.setEnabled(False)
+        QApplication.processEvents()
+
+        # Set highlighted person and defer redraw to allow UI update
+        self.highlighted_person = row
+        QTimer.singleShot(50, self.redraw_with_highlight)
+
+    def redraw_with_highlight(self):
+        """Redraw the image with the selected person highlighted."""
+        if not self.current_image or not self.current_detections:
+            return
+
+        try:
+            mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
+            masking_method = self.detection_settings.get('masking_method', 'Bounding box')
+
+            # Draw with highlighted person
+            annotated_image = self.draw_detections(
+                self.current_image,
+                self.current_detections,
+                self.detection_settings.get('crop_padding', 10),
+                mask_overlapping,
+                masking_method,
+                self.highlighted_person
+            )
+
+            # Convert and display
+            buffer = BytesIO()
+            annotated_image.save(buffer, format='PNG')
+            buffer.seek(0)
+            qimage = QImage.fromData(buffer.getvalue())
+            pixmap = QPixmap.fromImage(qimage)
+
+            # Update scene
+            self.graphics_scene.clear()
+            pixmap_item = QGraphicsPixmapItem(pixmap)
+            self.graphics_scene.addItem(pixmap_item)
+            self.graphics_scene.setSceneRect(pixmap_item.boundingRect())
+
+        finally:
+            # Hide loading indicator and re-enable table
+            self.loading_label.hide()
+            self.detection_table.setEnabled(True)
 
     def update_detection_table(self, detections: list):
         """Update the detection info table."""
@@ -492,6 +722,25 @@ class CaptionSettingsForm(QVBoxLayout):
         self.yolo_model_size_combo_box.addItems(['n', 's', 'm', 'l', 'x'])
         self.yolo_model_size_combo_box.setCurrentText('m')
 
+        self.mask_overlaps_check_box = SettingsBigCheckBox(
+            key='mask_overlapping_people', default=True)
+        self.mask_overlaps_check_box.setToolTip(
+            'Mask out other detected people when cropping each person to prevent confused tags')
+
+        self.masking_method_combo_box = FocusedScrollSettingsComboBox(
+            key='masking_method')
+        self.masking_method_combo_box.addItems(['Bounding box', 'Segmentation'])
+        self.masking_method_combo_box.setCurrentText('Bounding box')
+        self.masking_method_combo_box.setToolTip(
+            'Bounding box: Fast, rectangular masks. Segmentation: Precise pixel-level masks (slower)')
+
+        self.preserve_target_bbox_check_box = SettingsBigCheckBox(
+            key='preserve_target_bbox', default=True)
+        self.preserve_target_bbox_check_box.setToolTip(
+            'When using segmentation: preserve the full bounding box area for the target person\n'
+            '(includes shoes and accessories). Only mask overlapping people with segmentation.\n'
+            'Disable for strict person-only segmentation (may cut off shoes).')
+
         self.include_scene_tags_check_box = SettingsBigCheckBox(
             key='include_scene_tags', default=True)
 
@@ -499,7 +748,7 @@ class CaptionSettingsForm(QVBoxLayout):
             key='max_scene_tags', default=20, minimum=1, maximum=100)
 
         self.max_tags_per_person_spin_box = FocusedScrollSettingsSpinBox(
-            key='max_tags_per_person', default=50, minimum=5, maximum=200)
+            key='max_tags_per_person', default=20, minimum=5, maximum=200)
 
         # Use nested form layout for full-width person aliases field
         person_aliases_form = QFormLayout()
@@ -546,6 +795,12 @@ class CaptionSettingsForm(QVBoxLayout):
                                           self.crop_padding_spin_box)
         multi_person_settings_form.addRow('YOLO model size',
                                           self.yolo_model_size_combo_box)
+        multi_person_settings_form.addRow('Mask overlapping people',
+                                          self.mask_overlaps_check_box)
+        multi_person_settings_form.addRow('Masking method',
+                                          self.masking_method_combo_box)
+        multi_person_settings_form.addRow('Preserve target bbox (segmentation)',
+                                          self.preserve_target_bbox_check_box)
         multi_person_settings_form.addRow('Include scene tags',
                                           self.include_scene_tags_check_box)
         multi_person_settings_form.addRow('Maximum scene tags',
@@ -799,6 +1054,9 @@ class CaptionSettingsForm(QVBoxLayout):
             'detection_max_people': self.detection_max_people_spin_box.value(),
             'crop_padding': self.crop_padding_spin_box.value(),
             'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
+            'mask_overlapping_people': self.mask_overlaps_check_box.isChecked(),
+            'masking_method': self.masking_method_combo_box.currentText(),
+            'preserve_target_bbox': self.preserve_target_bbox_check_box.isChecked(),
             'include_scene_tags': self.include_scene_tags_check_box.isChecked(),
             'max_scene_tags': self.max_scene_tags_spin_box.value(),
             'max_tags_per_person': self.max_tags_per_person_spin_box.value(),
@@ -840,11 +1098,16 @@ class CaptionSettingsForm(QVBoxLayout):
             'detection_max_people': self.detection_max_people_spin_box.value(),
             'crop_padding': self.crop_padding_spin_box.value(),
             'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
+            'mask_overlapping_people': self.mask_overlaps_check_box.isChecked(),
+            'masking_method': self.masking_method_combo_box.currentText(),
         }
 
         # Create or show dialog
         if not hasattr(self, '_detection_preview_dialog') or not self._detection_preview_dialog:
             self._detection_preview_dialog = DetectionPreviewDialog(self.parentWidget())
+
+        # Set reference to settings form for refresh
+        self._detection_preview_dialog.settings_form = self
 
         self._detection_preview_dialog.set_image_and_settings(image_path, detection_settings)
         self._detection_preview_dialog.show()

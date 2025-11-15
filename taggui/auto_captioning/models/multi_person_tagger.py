@@ -17,6 +17,7 @@ from auto_captioning.models.wd_tagger import WdTaggerModel
 from auto_captioning.utils.person_detector import PersonDetector
 from auto_captioning.utils.scene_extractor import SceneExtractor
 from utils.image import Image
+from utils.settings import DEFAULT_SETTINGS, get_settings
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,9 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.detection_max_people = caption_settings.get('detection_max_people', 10)
         self.crop_padding = caption_settings.get('crop_padding', 10)
         self.yolo_model_size = caption_settings.get('yolo_model_size', 'm')
+        self.mask_overlapping_people = caption_settings.get('mask_overlapping_people', True)
+        self.masking_method = caption_settings.get('masking_method', 'Bounding box')
+        self.preserve_target_bbox = caption_settings.get('preserve_target_bbox', True)
         self.include_scene_tags = caption_settings.get('include_scene_tags', True)
         self.max_scene_tags = caption_settings.get('max_scene_tags', 20)
         self.max_tags_per_person = caption_settings.get('max_tags_per_person', 50)
@@ -104,14 +108,21 @@ class MultiPersonTagger(AutoCaptioningModel):
         logger.info("Loading multi-person tagger components...")
 
         # Initialize PersonDetector for YOLO
+        # Use segmentation model if masking method is 'Segmentation'
+        use_segmentation = (self.mask_overlapping_people and
+                           self.masking_method == 'Segmentation')
         self.person_detector = PersonDetector(
             model_size=self.yolo_model_size,
             device=str(self.device),
             conf_threshold=self.detection_confidence,
             min_size=self.detection_min_size,
-            max_people=self.detection_max_people
+            max_people=self.detection_max_people,
+            use_segmentation=use_segmentation
         )
-        logger.info("PersonDetector loaded")
+        if use_segmentation:
+            logger.info("PersonDetector loaded with segmentation")
+        else:
+            logger.info("PersonDetector loaded")
 
         # Initialize WdTaggerModel (reuse existing implementation)
         # Handle models_directory_path like WdTagger does
@@ -206,6 +217,166 @@ class MultiPersonTagger(AutoCaptioningModel):
 
         return image_array
 
+    def _mask_overlapping_bboxes(
+        self,
+        image: PilImage.Image,
+        target_bbox: list[int],
+        all_detections: list[dict],
+        target_index: int,
+        padding: int
+    ) -> PilImage.Image:
+        """
+        Create a copy of the image with other people masked out (bounding box method).
+
+        Args:
+            image: Original PIL Image
+            target_bbox: Bounding box of the person we want to keep [x1, y1, x2, y2]
+            all_detections: List of all person detections
+            target_index: Index of the target person in all_detections
+            padding: Crop padding to determine the crop region
+
+        Returns:
+            PIL Image with other people masked to neutral grey
+        """
+        from PIL import ImageDraw
+
+        # Create a copy to mask
+        masked_image = image.copy()
+        draw = ImageDraw.Draw(masked_image)
+
+        # Calculate the crop region that will be extracted
+        width, height = image.size
+        tx1, ty1, tx2, ty2 = target_bbox
+        crop_x1 = max(0, tx1 - padding)
+        crop_y1 = max(0, ty1 - padding)
+        crop_x2 = min(width, tx2 + padding)
+        crop_y2 = min(height, ty2 + padding)
+
+        # Mask other people whose bboxes overlap with the crop region
+        for i, detection in enumerate(all_detections):
+            if i == target_index:
+                continue  # Don't mask the target person
+
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+
+            # Check if this bbox overlaps with the crop region
+            if not (x2 < crop_x1 or x1 > crop_x2 or y2 < crop_y1 or y1 > crop_y2):
+                # Overlaps - mask only the overlapping part with neutral grey (127, 127, 127)
+                # Calculate the intersection of the bbox with the crop region
+                overlap_x1 = max(x1, crop_x1)
+                overlap_y1 = max(y1, crop_y1)
+                overlap_x2 = min(x2, crop_x2)
+                overlap_y2 = min(y2, crop_y2)
+                draw.rectangle([overlap_x1, overlap_y1, overlap_x2, overlap_y2], fill=(127, 127, 127))
+                logger.debug(f"Masked person {i+1} bbox for person {target_index+1} crop")
+
+        return masked_image
+
+    def _mask_overlapping_segmentation(
+        self,
+        image: PilImage.Image,
+        target_bbox: list[int],
+        all_detections: list[dict],
+        target_index: int,
+        padding: int
+    ) -> PilImage.Image:
+        """
+        Create a copy of the image with other people masked out (segmentation method).
+
+        Args:
+            image: Original PIL Image
+            target_bbox: Bounding box of the person we want to keep [x1, y1, x2, y2]
+            all_detections: List of all person detections (must include 'mask' key)
+            target_index: Index of the target person in all_detections
+            padding: Crop padding to determine the crop region
+
+        Returns:
+            PIL Image with other people masked to neutral grey using segmentation masks
+        """
+        import numpy as np
+        from PIL import ImageDraw
+
+        # Create a copy to mask
+        masked_image = image.copy()
+        img_array = np.array(masked_image)
+
+        # Calculate the crop region that will be extracted
+        width, height = image.size
+        tx1, ty1, tx2, ty2 = target_bbox
+        crop_x1 = max(0, tx1 - padding)
+        crop_y1 = max(0, ty1 - padding)
+        crop_x2 = min(width, tx2 + padding)
+        crop_y2 = min(height, ty2 + padding)
+
+        # Determine number of channels (RGB=3, RGBA=4)
+        num_channels = img_array.shape[2] if len(img_array.shape) == 3 else 1
+        grey_value = [127] * num_channels if num_channels > 1 else 127
+
+        # If preserve_target_bbox is True, create a protected region for the target's full bbox
+        protected_region = None
+        if self.preserve_target_bbox:
+            protected_region = np.zeros((height, width), dtype=bool)
+            # Protect the target person's full bounding box area
+            protected_region[ty1:ty2, tx1:tx2] = True
+            logger.debug(f"Created protected bbox region for person {target_index+1}: ({tx1},{ty1})-({tx2},{ty2})")
+
+        # Mask other people using their segmentation masks
+        for i, detection in enumerate(all_detections):
+            if i == target_index:
+                continue  # Don't mask the target person
+
+            mask = detection.get('mask')
+            if mask is None:
+                # Fall back to bounding box if mask not available
+                bbox = detection['bbox']
+                x1, y1, x2, y2 = bbox
+                if not (x2 < crop_x1 or x1 > crop_x2 or y2 < crop_y1 or y1 > crop_y2):
+                    # Mask the overlapping part of the bbox
+                    overlap_x1 = max(x1, crop_x1)
+                    overlap_y1 = max(y1, crop_y1)
+                    overlap_x2 = min(x2, crop_x2)
+                    overlap_y2 = min(y2, crop_y2)
+
+                    # If protecting target bbox, don't mask protected pixels
+                    if protected_region is not None:
+                        bbox_mask = np.zeros((height, width), dtype=bool)
+                        bbox_mask[overlap_y1:overlap_y2, overlap_x1:overlap_x2] = True
+                        # Only mask pixels outside the protected region
+                        pixels_to_mask = bbox_mask & ~protected_region
+                        img_array[pixels_to_mask] = grey_value
+                    else:
+                        img_array[overlap_y1:overlap_y2, overlap_x1:overlap_x2] = grey_value
+
+                    logger.debug(f"Masked person {i+1} bbox (no mask available) for person {target_index+1} crop")
+                continue
+
+            # Check if mask shape matches image shape
+            if mask.shape[0] != height or mask.shape[1] != width:
+                logger.warning(f"Mask shape {mask.shape} doesn't match image shape ({height}, {width})")
+                continue
+
+            # Only mask the pixels that belong to this person AND overlap with the crop region
+            # Create a mask for the crop region
+            crop_mask = np.zeros_like(mask, dtype=bool)
+            crop_mask[crop_y1:crop_y2, crop_x1:crop_x2] = True
+
+            # Only mask pixels that are both part of the person AND in the crop region
+            pixels_to_mask = mask & crop_mask
+
+            # If protecting target bbox, exclude protected pixels
+            if protected_region is not None:
+                pixels_to_mask = pixels_to_mask & ~protected_region
+
+            if pixels_to_mask.any():
+                # Mask only the overlapping pixels
+                img_array[pixels_to_mask] = grey_value
+                logger.debug(f"Masked person {i+1} segmentation for person {target_index+1} crop")
+
+        # Convert back to PIL Image
+        masked_image = PilImage.fromarray(img_array)
+        return masked_image
+
     def generate_caption(
         self,
         model_inputs: PilImage.Image,
@@ -233,19 +404,30 @@ class MultiPersonTagger(AutoCaptioningModel):
         pil_image = model_inputs
 
         # Save image temporarily for YOLO detection
-        # Use the image's directory if available, otherwise use system temp
         import tempfile
         import uuid
         from pathlib import Path
 
-        if image and hasattr(image, 'path'):
-            # Create temp file in same directory as the image (for privacy)
+        # Read temp file location setting
+        settings = get_settings()
+        temp_file_location = settings.value(
+            'temp_file_location',
+            defaultValue=DEFAULT_SETTINGS['temp_file_location'],
+            type=str
+        )
+
+        # Determine where to create temp file based on setting
+        use_source_folder = (temp_file_location == 'Source folder' and
+                            image and hasattr(image, 'path'))
+
+        if use_source_folder:
+            # Create temp file in same directory as the image
             temp_dir = image.path.parent
             temp_filename = f'.taggui_tmp_person_detection_{uuid.uuid4().hex[:8]}.png'
             temp_path = temp_dir / temp_filename
             pil_image.save(temp_path)
         else:
-            # Fall back to system temp directory
+            # Use system temp directory
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                 temp_path = tmp_file.name
                 pil_image.save(temp_path)
@@ -269,9 +451,31 @@ class MultiPersonTagger(AutoCaptioningModel):
             person_tags_list = []
             for i, detection in enumerate(detections):
                 try:
+                    # Apply masking if enabled
+                    image_to_crop = pil_image
+                    if self.mask_overlapping_people and len(detections) > 1:
+                        if self.masking_method == 'Bounding box':
+                            # Mask other people with bounding boxes
+                            image_to_crop = self._mask_overlapping_bboxes(
+                                pil_image,
+                                detection['bbox'],
+                                detections,
+                                i,
+                                self.crop_padding
+                            )
+                        elif self.masking_method == 'Segmentation':
+                            # Mask other people with segmentation masks
+                            image_to_crop = self._mask_overlapping_segmentation(
+                                pil_image,
+                                detection['bbox'],
+                                detections,
+                                i,
+                                self.crop_padding
+                            )
+
                     # Crop person
                     cropped = self.person_detector.crop_person(
-                        pil_image,
+                        image_to_crop,
                         detection['bbox'],
                         padding=self.crop_padding
                     )
