@@ -1,5 +1,5 @@
-person1: microphone, holding microphone, realistic, facial hair, male focus, jacket, holding, black jacket, pants, black pants, 1boy, shirt, beard, belt, white shirt
-person2: 1girl, dress, microphone, photorealistic, brown hair, high heels, realistic, long hair, solo, side slit, black dress, holding, full body, wavy hair, curly hair
-person3: instrument, 1boy, male focus, facial hair, guitar, solo, black jacket, pants, black footwear, black pants, music, holding instrument, playing instrument, jacket, black shirt
-person4: guitar, 1boy, instrument, dark-skinned male, dark skin, male focus, holding instrument, black jacket, black pants, jacket, very short hair, holding, buzz cut, pants, black footwear
-person5: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie, formal, holding, black suit, pants, bow
+person1: microphone, holding microphone, realistic, facial hair, male focus, jacket, holding, black jacket, pants, black pants
+person2: 1girl, dress, microphone, photorealistic, brown hair, high heels, realistic, long hair, solo, side slit
+person3: instrument, 1boy, male focus, facial hair, guitar, solo, black jacket, pants, black footwear, black pants
+person4: guitar, 1boy, instrument, dark-skinned male, dark skin, male focus, holding instrument, black jacket, black pants, jacket
+person5: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie

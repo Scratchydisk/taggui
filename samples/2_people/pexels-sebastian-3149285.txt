@@ -1,3 +1,3 @@
-person1: 1girl, solo, long hair, shirt, from behind, outdoors, bracelet, bag, ocean, jewelry, standing, short sleeves, beach, sandals, facing away
-person2: 1girl, solo, sandals, bag, from behind, long hair, beach, outdoors, dress, anklet, jewelry, shoulder bag, walking, evening, facing away
-scene: outdoors, beach, ocean, scenery, sunset
+person1: 1girl, solo, long hair, shirt, from behind, outdoors, bracelet, bag, ocean, jewelry
+person2: 1girl, solo, sandals, bag, from behind, long hair, beach, outdoors, dress, anklet
+scene: outdoors, beach, ocean, scenery

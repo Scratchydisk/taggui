@@ -1,3 +1,3 @@
-person1: 1girl, denim, motor vehicle, realistic, jeans, photorealistic, car, shoes, pants, sneakers, solo, sitting, outdoors, long hair, brown hair
-person2: 1girl, denim, jeans, motor vehicle, car, cup, shoes, pants, long hair, sneakers, disposable cup, coffee cup, holding, blurry background, solo
+person1: 1girl, denim, motor vehicle, realistic, jeans, photorealistic, car, shoes, pants, sneakers
+person2: 1girl, denim, jeans, motor vehicle, car, cup, shoes, pants, long hair, sneakers
 scene: outdoors

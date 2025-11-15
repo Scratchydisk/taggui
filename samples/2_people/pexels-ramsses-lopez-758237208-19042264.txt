@@ -1,3 +1,3 @@
-person1: multiple boys, 2boys, hat, stairs, facepaint, jacket, sitting, hat feather, bow, facial hair, male focus, black hair, orange skirt, black footwear, bowtie
-person2: skirt, orange skirt, facepaint, hat, long skirt, white footwear, solo, jacket, long sleeves, shirt, mask, black hair, 1boy, belt, 1girl
-scene: flower, orange flower
+person1: multiple boys, 2boys, hat, stairs, facepaint, jacket, sitting, hat feather, bow, facial hair
+person2: skirt, orange skirt, facepaint, hat, long skirt, white footwear, solo, jacket, long sleeves, shirt
+scene: flower

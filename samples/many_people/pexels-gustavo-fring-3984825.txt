@@ -1,1 +1,4 @@
-microphone, instrument, guitar, 3boys, multiple boys, music, dress, beard, black jacket, holding microphone, holding, electric guitar, black dress, holding instrument, jacket, dark skin, brown hair, dark-skinned male, singing, pants, playing instrument, shirt, formal, smile, black pants, short hair, suit, bass guitar, long hair
+person1: microphone, black jacket, facial hair, music, jacket, singing, holding, holding microphone, pants, realistic
+person2: 1boy, microphone, music, instrument, guitar, male focus, holding, dark-skinned male, dark skin, very short hair
+person3: 1girl, microphone, dress, instrument, guitar, realistic, photorealistic, brown hair, solo focus, holding microphone
+person4: 1boy, male focus, instrument, solo, guitar, facial hair, beard, realistic, blurry, jacket

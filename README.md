@@ -118,6 +118,8 @@ The `multi-person-wd-yolo` model is a specialised captioning model that detects 
 3. Tags the full image and extracts scene/environment tags
 4. Formats output as structured text with person and scene sections
 
+Person detection tends to go left to right, foreground to background, but this isn't a hard and fast rule.
+
 **Example output:**
 
 <img src='samples/2_people/pexels-sebastian-3149285.jpg' alt='Sample 2 Person Image' width='50%'>
@@ -137,13 +139,13 @@ person4: guitar, 1boy, instrument, dark-skinned male, dark skin, male focus, hol
 person5: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie, formal, holding, black suit, pants, bow
 ```
 
-**With person aliases** (using `lead_singer, female_vocalist, guitarist1, guitarist2, bassist`):
+**With person aliases** (using `lead_singer, female_vocalist, guitarist1, guitarist2, sax_player`):
 ```
 lead_singer: microphone, holding microphone, realistic, facial hair, male focus, jacket, holding, black jacket, pants, black pants, 1boy, shirt, beard, belt, white shirt
 female_vocalist: 1girl, dress, microphone, photorealistic, brown hair, high heels, realistic, long hair, solo, side slit, black dress, holding, full body, wavy hair, curly hair
 guitarist1: instrument, 1boy, male focus, facial hair, guitar, solo, black jacket, pants, black footwear, black pants, music, holding instrument, playing instrument, jacket, black shirt
 guitarist2: guitar, 1boy, instrument, dark-skinned male, dark skin, male focus, holding instrument, black jacket, black pants, jacket, very short hair, holding, buzz cut, pants, black footwear
-bassist: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie, formal, holding, black suit, pants, bow
+sax_player: male focus, 1boy, beard, facial hair, black jacket, instrument, suit, black footwear, realistic, bowtie, formal, holding, black suit, pants, bow
 ```
 
 **Multi-person parameters:**

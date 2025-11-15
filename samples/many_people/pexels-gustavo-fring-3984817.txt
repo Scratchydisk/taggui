@@ -1,1 +1,4 @@
-instrument, guitar, 4boys, playing instrument, multiple boys, black jacket, music, very short hair, holding instrument, electric guitar, beard, dark-skinned male, short hair, black pants, pants, dark skin, suit, black suit, buzz cut, black footwear, holding, jacket, black necktie, standing, formal, shirt, bass guitar, necktie, shoes, keyboard (instrument)
+person1: 1boy, male focus, instrument, solo, holding instrument, facial hair, realistic, black jacket, pants, jacket
+person2: male focus, 1boy, solo, music, playing instrument, black jacket, facial hair, realistic, instrument, black pants
+person3: 1boy, male focus, guitar, solo, instrument, black footwear, playing instrument, music, holding instrument, pants
+person4: 1boy, male focus, solo, black jacket, full body, instrument, facial hair, black footwear, beard, music
