@@ -1,12 +1,15 @@
 import sys
 from pathlib import Path
 
+from PIL import Image as PilImage, ImageDraw
 from PySide6.QtCore import QModelIndex, Qt, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QTextCursor
-from PySide6.QtWidgets import (QAbstractScrollArea, QDockWidget, QFormLayout,
-                               QFrame, QHBoxLayout, QLabel, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QScrollArea,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QFontMetrics, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtWidgets import (QAbstractScrollArea, QDialog, QDockWidget,
+                               QFormLayout, QFrame, QHBoxLayout, QHeaderView,
+                               QLabel, QMessageBox, QPlainTextEdit,
+                               QProgressBar, QPushButton, QScrollArea,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
@@ -46,6 +49,210 @@ class HorizontalLine(QFrame):
         super().__init__()
         self.setFrameShape(QFrame.Shape.HLine)
         self.setFrameShadow(QFrame.Shadow.Raised)
+
+
+class DetectionPreviewDialog(QDialog):
+    """Non-modal dialog for previewing person detection results."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Detection Preview")
+        self.resize(800, 900)
+        self.setModal(False)  # Non-modal allows adjusting settings in parent
+
+        # Store data
+        self.image_path = None
+        self.detection_settings = {}
+
+        # Main layout
+        layout = QVBoxLayout(self)
+
+        # Settings display
+        self.settings_label = QLabel()
+        self.settings_label.setWordWrap(True)
+        layout.addWidget(self.settings_label)
+
+        # Image display with scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(500)
+
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scroll_area.setWidget(self.image_label)
+        layout.addWidget(scroll_area)
+
+        # Detection count label
+        self.detection_count_label = QLabel()
+        self.detection_count_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self.detection_count_label)
+
+        # Detection info table
+        self.detection_table = QTableWidget()
+        self.detection_table.setColumnCount(4)
+        self.detection_table.setHorizontalHeaderLabels(
+            ["#", "Confidence", "Size (WxH)", "Bbox (x1,y1,x2,y2)"]
+        )
+        self.detection_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.detection_table.setMaximumHeight(150)
+        layout.addWidget(self.detection_table)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.run_detection)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        button_layout.addWidget(self.refresh_button)
+        button_layout.addStretch()
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+
+    def set_image_and_settings(self, image_path: str, detection_settings: dict):
+        """Set the image path and detection settings, then run detection."""
+        self.image_path = image_path
+        self.detection_settings = detection_settings
+        self.update_settings_display()
+        self.run_detection()
+
+    def update_settings_display(self):
+        """Update the settings display label."""
+        settings = self.detection_settings
+        text = (
+            f"Settings: Confidence={settings.get('detection_confidence', 0.5):.2f}, "
+            f"MinSize={settings.get('detection_min_size', 50)}px, "
+            f"Padding={settings.get('crop_padding', 10)}px, "
+            f"YOLO={settings.get('yolo_model_size', 'm')}"
+        )
+        self.settings_label.setText(text)
+
+    def run_detection(self):
+        """Run person detection and display results."""
+        if not self.image_path:
+            return
+
+        try:
+            # Import here to avoid circular dependencies
+            from auto_captioning.utils.person_detector import PersonDetector
+
+            # Create PersonDetector with current settings
+            detector = PersonDetector(
+                model_size=self.detection_settings.get('yolo_model_size', 'm'),
+                device='cpu',  # Use CPU for preview to avoid GPU memory issues
+                conf_threshold=self.detection_settings.get('detection_confidence', 0.5),
+                min_size=self.detection_settings.get('detection_min_size', 50),
+                max_people=self.detection_settings.get('detection_max_people', 10)
+            )
+
+            # Run detection
+            detections = detector.detect_people(self.image_path)
+
+            # Load image
+            pil_image = PilImage.open(self.image_path).convert('RGB')
+
+            # Draw bounding boxes
+            annotated_image = self.draw_detections(
+                pil_image,
+                detections,
+                self.detection_settings.get('crop_padding', 10)
+            )
+
+            # Convert to QPixmap and display
+            annotated_image.save('/tmp/detection_preview.png')
+            pixmap = QPixmap('/tmp/detection_preview.png')
+            self.image_label.setPixmap(pixmap)
+
+            # Update detection count
+            count = len(detections)
+            self.detection_count_label.setText(
+                f"{count} {'person' if count == 1 else 'people'} detected"
+            )
+
+            # Update table
+            self.update_detection_table(detections)
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Detection Error",
+                f"Failed to run detection: {str(e)}"
+            )
+
+    def draw_detections(self, image: PilImage.Image, detections: list, padding: int) -> PilImage.Image:
+        """Draw bounding boxes and padding on image."""
+        # Make a copy to draw on
+        img_copy = image.copy()
+        draw = ImageDraw.Draw(img_copy)
+
+        # Color palette for different people (RGB)
+        colors = [
+            (0, 255, 0),      # Green
+            (0, 100, 255),    # Blue
+            (255, 50, 50),    # Red
+            (255, 165, 0),    # Orange
+            (255, 0, 255),    # Magenta
+            (0, 255, 255),    # Cyan
+            (255, 255, 0),    # Yellow
+            (128, 0, 128),    # Purple
+            (255, 192, 203),  # Pink
+            (165, 42, 42),    # Brown
+        ]
+
+        for i, detection in enumerate(detections):
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+            color = colors[i % len(colors)]
+
+            # Draw detection bbox (thick line)
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+
+            # Draw padding region (thin dashed-like line)
+            px1 = max(0, x1 - padding)
+            py1 = max(0, y1 - padding)
+            px2 = min(img_copy.width, x2 + padding)
+            py2 = min(img_copy.height, y2 + padding)
+
+            # Draw padding box with thinner line and lighter color
+            padding_color = tuple(min(255, c + 80) for c in color)
+            draw.rectangle([px1, py1, px2, py2], outline=padding_color, width=2)
+
+            # Draw person number
+            text = f"Person {i+1}"
+            # Simple text position - top left of bbox
+            draw.text((x1 + 5, y1 + 5), text, fill=color)
+
+        return img_copy
+
+    def update_detection_table(self, detections: list):
+        """Update the detection info table."""
+        self.detection_table.setRowCount(len(detections))
+
+        for i, detection in enumerate(detections):
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+            width = x2 - x1
+            height = y2 - y1
+            confidence = detection['confidence']
+
+            # Person number
+            self.detection_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+
+            # Confidence
+            self.detection_table.setItem(
+                i, 1, QTableWidgetItem(f"{confidence:.3f}")
+            )
+
+            # Size
+            self.detection_table.setItem(
+                i, 2, QTableWidgetItem(f"{width}x{height}")
+            )
+
+            # Bbox coordinates
+            self.detection_table.setItem(
+                i, 3, QTableWidgetItem(f"({x1},{y1},{x2},{y2})")
+            )
 
 
 class CaptionSettingsForm(QVBoxLayout):
@@ -191,6 +398,13 @@ class CaptionSettingsForm(QVBoxLayout):
         person_aliases_form.addRow('Person aliases',
                                    self.person_aliases_line_edit)
 
+        # Preview detection button
+        self.preview_detection_button = TallPushButton('Preview Detection')
+        self.preview_detection_button.setToolTip(
+            'Preview person detection and bounding boxes with current settings (only enabled when 1 image selected)')
+        self.preview_detection_button.clicked.connect(self.show_detection_preview)
+        self.preview_detection_button.setEnabled(False)  # Disabled by default
+
         # Use nested form layout for WD Tagger model dropdown (label on top)
         wd_model_form = QFormLayout()
         wd_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -222,6 +436,7 @@ class CaptionSettingsForm(QVBoxLayout):
         multi_person_settings_form.addRow('Maximum tags per person',
                                           self.max_tags_per_person_spin_box)
         multi_person_settings_form.addRow(person_aliases_form)
+        multi_person_settings_form.addRow(self.preview_detection_button)
         multi_person_settings_form.addRow(wd_model_form)
 
         # Also add WD Tagger min_probability and max_tags for multi-person
@@ -477,6 +692,48 @@ class CaptionSettingsForm(QVBoxLayout):
                 self.mp_tags_to_exclude_text_edit.toPlainText()
         }
 
+    def show_detection_preview(self):
+        """Show the detection preview dialog."""
+        # Get currently selected image
+        parent = self.parent()
+        while parent and not isinstance(parent, AutoCaptioner):
+            parent = parent.parent()
+
+        if not parent:
+            return
+
+        selected_indexes = parent.image_list.selectionModel().selectedIndexes()
+        if len(selected_indexes) != 1:
+            QMessageBox.warning(
+                self.parentWidget(),
+                "No Image Selected",
+                "Please select exactly one image to preview detection."
+            )
+            return
+
+        # Get image path
+        image_index = selected_indexes[0]
+        image = parent.image_list_model.get_image(image_index)
+        image_path = str(image.path)
+
+        # Get current detection settings
+        detection_settings = {
+            'detection_confidence': self.detection_confidence_spin_box.value(),
+            'detection_min_size': self.detection_min_size_spin_box.value(),
+            'detection_max_people': self.detection_max_people_spin_box.value(),
+            'crop_padding': self.crop_padding_spin_box.value(),
+            'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
+        }
+
+        # Create or show dialog
+        if not hasattr(self, '_detection_preview_dialog') or not self._detection_preview_dialog:
+            self._detection_preview_dialog = DetectionPreviewDialog(self.parentWidget())
+
+        self._detection_preview_dialog.set_image_and_settings(image_path, detection_settings)
+        self._detection_preview_dialog.show()
+        self._detection_preview_dialog.raise_()
+        self._detection_preview_dialog.activateWindow()
+
 
 @Slot()
 def restore_stdout_and_stderr():
@@ -535,6 +792,27 @@ class AutoCaptioner(QDockWidget):
 
         self.start_cancel_button.clicked.connect(
             self.start_or_cancel_captioning)
+
+        # Connect to selection changes to update preview button state
+        self.image_list.selectionModel().selectionChanged.connect(
+            self.update_preview_button_state)
+
+        # Also connect to model changes
+        self.caption_settings_form.model_combo_box.currentTextChanged.connect(
+            self.update_preview_button_state)
+
+        # Initial update
+        self.update_preview_button_state()
+
+    @Slot()
+    def update_preview_button_state(self):
+        """Enable preview button only when 1 image selected and multi-person model selected."""
+        selected_count = len(self.image_list.selectionModel().selectedIndexes())
+        model_id = self.caption_settings_form.model_combo_box.currentText()
+        is_multi_person_model = 'multi-person' in model_id.lower()
+
+        should_enable = (selected_count == 1) and is_multi_person_model
+        self.caption_settings_form.preview_detection_button.setEnabled(should_enable)
 
     @Slot()
     def start_or_cancel_captioning(self):

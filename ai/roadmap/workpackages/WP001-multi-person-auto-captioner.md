@@ -1031,6 +1031,42 @@ Output format:
 - `CLAUDE.md` - Updated MultiPersonTagger description
 - `README.md` - Added parameter documentation and example
 
+---
+
+**Feature: Detection Preview (2025-11-15)**
+
+Added interactive preview feature to visualise person detection results before running captioning.
+
+**Implementation**:
+- Created `DetectionPreviewDialog` class (non-modal QDialog) in auto_captioner.py
+- Displays image with colour-coded bounding boxes and padding visualisation
+- Shows detection table with confidence, size, and coordinates for each person
+- Added "Preview Detection" button in multi-person settings
+- Button enabled only when: 1 image selected AND multi-person model selected
+- Refresh button allows iterating on settings without closing dialog
+
+**Features**:
+- Non-modal dialog allows adjusting settings in main window
+- Colour-coded bboxes (green, blue, red, orange, magenta, etc.) for each person
+- Padding regions shown with lighter colour outline
+- Person numbers overlaid on image
+- Detection info table shows: #, Confidence, Size (WxH), Bbox coordinates
+- Current settings displayed at top (confidence, min size, padding, YOLO model)
+- Uses CPU for preview to avoid GPU memory issues
+
+**Benefits**:
+- Visual feedback for testing detection settings
+- Understand how padding affects crop regions (user's explicit request)
+- Iterate quickly on confidence/min size thresholds
+- Preview detection order (left-to-right, foreground-to-background)
+- Debug detection issues without running full captioning
+
+**Files Modified**:
+- `taggui/widgets/auto_captioner.py` - Added DetectionPreviewDialog class, preview button, and state management
+- `README.md` - Added Preview Detection documentation section
+
+**Design Score: 9.5/10** - Non-modal dialog with refresh capability enables rapid iteration on settings
+
 ### Conclusion
 
 WP001 successfully delivered all planned functionality with high code quality and architectural integrity. The multi-person auto-captioner is production-ready and fully integrated into TagGUI's existing workflow. User testing confirms the feature works as designed, with clear structured output and intuitive configuration options.

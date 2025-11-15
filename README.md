@@ -163,6 +163,20 @@ sax_player: male focus, 1boy, beard, facial hair, black jacket, instrument, suit
 - `Tag confidence threshold`: Minimum probability for WD Tagger tags. Default: 0.35
 - `Tags to exclude`: Tags that should not be generated, separated by commas
 
+**Preview Detection:**
+
+The `Preview Detection` button allows you to visualise person detection results before running the full captioning process. This is useful for testing different detection settings and understanding how padding affects the cropped regions.
+
+- Select exactly one image to enable the Preview Detection button
+- Click the button to open a non-modal preview window showing:
+  - The image with colour-coded bounding boxes for each detected person
+  - Padding regions visualised around each detection
+  - Detection confidence scores, sizes, and coordinates
+  - Current detection settings used
+- Adjust detection settings in the main window (confidence, padding, YOLO model size, etc.)
+- Click `Refresh` in the preview window to see updated detection results
+- The preview window stays open, allowing you to iterate on settings quickly
+
 If no people are detected in an image, the model automatically falls back to standard WD Tagger behaviour, tagging the entire image normally.
 
 ## Advanced Image List Filtering
