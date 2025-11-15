@@ -49,6 +49,14 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.max_scene_tags = caption_settings.get('max_scene_tags', 20)
         self.max_tags_per_person = caption_settings.get('max_tags_per_person', 50)
 
+        # Parse person aliases (comma-separated)
+        person_aliases_str = caption_settings.get('person_aliases', '').strip()
+        if person_aliases_str:
+            # Split by comma and strip whitespace from each alias
+            self.person_aliases = [alias.strip() for alias in person_aliases_str.split(',') if alias.strip()]
+        else:
+            self.person_aliases = []
+
         # WD Tagger settings (construct from mp_ prefixed settings)
         self.wd_tagger_settings = {
             'show_probabilities': False,  # Not shown in console for multi-person
@@ -322,14 +330,20 @@ class MultiPersonTagger(AutoCaptioningModel):
             scene_tags: List of scene tags
 
         Returns:
-            Formatted string: "person1: tags, person2: tags, scene: tags"
+            Formatted string with person aliases or default personN labels
         """
         parts = []
 
         # Add person tags
         for i, tags in enumerate(person_tags_list):
             if tags:  # Only include if person has tags
-                person_str = f"person{i+1}: {self.thread.tag_separator.join(tags)}"
+                # Use alias if available, otherwise fall back to personN
+                if i < len(self.person_aliases):
+                    person_label = self.person_aliases[i]
+                else:
+                    person_label = f"person{i+1}"
+
+                person_str = f"{person_label}: {self.thread.tag_separator.join(tags)}"
                 parts.append(person_str)
 
         # Add scene tags

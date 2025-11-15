@@ -177,6 +177,20 @@ class CaptionSettingsForm(QVBoxLayout):
         self.max_tags_per_person_spin_box = FocusedScrollSettingsSpinBox(
             key='max_tags_per_person', default=50, minimum=5, maximum=200)
 
+        # Use nested form layout for full-width person aliases field
+        person_aliases_form = QFormLayout()
+        person_aliases_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapAllRows)
+        person_aliases_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.person_aliases_line_edit = SettingsLineEdit(
+            key='person_aliases')
+        self.person_aliases_line_edit.setPlaceholderText(
+            'e.g., singer, guitarist, drummer (leave empty for person1, person2, etc.)')
+        self.person_aliases_line_edit.setClearButtonEnabled(True)
+        person_aliases_form.addRow('Person aliases',
+                                   self.person_aliases_line_edit)
+
         # Use nested form layout for WD Tagger model dropdown (label on top)
         wd_model_form = QFormLayout()
         wd_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -207,6 +221,7 @@ class CaptionSettingsForm(QVBoxLayout):
                                           self.max_scene_tags_spin_box)
         multi_person_settings_form.addRow('Maximum tags per person',
                                           self.max_tags_per_person_spin_box)
+        multi_person_settings_form.addRow(person_aliases_form)
         multi_person_settings_form.addRow(wd_model_form)
 
         # Also add WD Tagger min_probability and max_tags for multi-person
@@ -455,6 +470,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'include_scene_tags': self.include_scene_tags_check_box.isChecked(),
             'max_scene_tags': self.max_scene_tags_spin_box.value(),
             'max_tags_per_person': self.max_tags_per_person_spin_box.value(),
+            'person_aliases': self.person_aliases_line_edit.text(),
             'wd_model': self.wd_model_combo_box.currentText(),
             'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
             'mp_wd_tagger_tags_to_exclude':

@@ -997,6 +997,42 @@ This implementation successfully lays groundwork for Phase 2 and Phase 3:
 - `taggui/auto_captioning/utils/scene_extractor.py`
 - `taggui/auto_captioning/models/multi_person_tagger.py`
 
+### Post-Implementation Enhancement
+
+**Feature: Person Aliases (2025-11-15)**
+
+Added support for custom person labels to replace default `person1`, `person2`, etc. naming.
+
+**Implementation**:
+- Added `person_aliases` UI field in auto_captioner.py (full-width text input with placeholder)
+- Parse comma-separated aliases in MultiPersonTagger.__init__()
+- Updated _format_output() to use aliases when available, fall back to personN for remaining people
+- Added to caption_settings dict and QSettings persistence
+
+**Example Usage**:
+```
+Input aliases: "singer, guitarist, drummer"
+Output format:
+  singer: microphone, singing, 1boy, ...
+  guitarist: guitar, playing, 1boy, ...
+  drummer: drums, playing, 1boy, ...
+  scene: stage, concert, lights
+```
+
+**Benefits**:
+- More semantic and readable output for users
+- Useful for multi-person image datasets where roles are known
+- Backwards compatible - empty aliases default to person1, person2, etc.
+- Handles partial aliases (e.g., only 2 aliases for 5 people)
+
+**Files Modified**:
+- `taggui/widgets/auto_captioner.py` - Added person_aliases UI field and setting
+- `taggui/auto_captioning/models/multi_person_tagger.py` - Parse aliases and use in formatting
+- `CLAUDE.md` - Updated MultiPersonTagger description
+- `README.md` - Added parameter documentation and example
+
 ### Conclusion
 
 WP001 successfully delivered all planned functionality with high code quality and architectural integrity. The multi-person auto-captioner is production-ready and fully integrated into TagGUI's existing workflow. User testing confirms the feature works as designed, with clear structured output and intuitive configuration options.
+
+The post-implementation addition of person aliases further enhances usability by allowing users to assign meaningful labels to detected people, making the output more readable and domain-specific.

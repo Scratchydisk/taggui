@@ -71,7 +71,7 @@ If flash-attn fails to build, the application will work fine without it. FlashAt
 **Auto-Captioning System**
 - `AutoCaptioningModel`: Base class for all captioning models. Handles model loading, prompt template variables ({tags}, {name}, {directory}), generation parameters, and constrained generation (bad_words, forced_words).
 - Model implementations in `auto_captioning/models/`: Each file implements a specific VLM (Florence-2, LLaVA variants, Phi-3-Vision, Moondream, JoyCaption, WD Tagger).
-- `MultiPersonTagger`: Specialised model combining YOLOv8 person detection with WD Tagger for multi-person images. Generates per-person tags plus scene tags in format: `person1: tags, person2: tags, scene: tags`. Uses composition pattern with reusable components (`PersonDetector`, `SceneExtractor`). Falls back to standard WD Tagger if no people detected.
+- `MultiPersonTagger`: Specialised model combining YOLOv8 person detection with WD Tagger for multi-person images. Generates per-person tags plus scene tags in format: `person1: tags, person2: tags, scene: tags` (or custom aliases like `singer: tags, guitarist: tags`). Supports configurable person aliases to replace default labels. Uses composition pattern with reusable components (`PersonDetector`, `SceneExtractor`). Falls back to standard WD Tagger if no people detected.
 - `CaptioningThread`: QThread running caption generation in background to avoid blocking the UI.
 
 ### Data Flow
