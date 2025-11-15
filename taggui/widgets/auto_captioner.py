@@ -2,14 +2,15 @@ import sys
 from pathlib import Path
 
 from PIL import Image as PilImage, ImageDraw
-from PySide6.QtCore import QModelIndex, Qt, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QPainter, QPen, QPixmap, QTextCursor
-from PySide6.QtWidgets import (QAbstractScrollArea, QDialog, QDockWidget,
-                               QFormLayout, QFrame, QHBoxLayout, QHeaderView,
-                               QLabel, QMessageBox, QPlainTextEdit,
-                               QProgressBar, QPushButton, QScrollArea,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QFontMetrics, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
+from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
+                               QDockWidget, QFormLayout, QFrame,
+                               QGraphicsPixmapItem, QGraphicsScene,
+                               QGraphicsView, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QPlainTextEdit, QProgressBar,
+                               QPushButton, QScrollArea, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
@@ -51,13 +52,76 @@ class HorizontalLine(QFrame):
         self.setFrameShadow(QFrame.Shadow.Raised)
 
 
+class ZoomableGraphicsView(QGraphicsView):
+    """QGraphicsView with mouse wheel zoom and pan support."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._zoom = 0
+        self._zoom_factor = 1.15
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle mouse wheel for zooming."""
+        if event.angleDelta().y() > 0:
+            # Zoom in
+            factor = self._zoom_factor
+            self._zoom += 1
+        else:
+            # Zoom out
+            factor = 1 / self._zoom_factor
+            self._zoom -= 1
+
+        # Limit zoom range
+        if self._zoom > 10:
+            self._zoom = 10
+            return
+        if self._zoom < -10:
+            self._zoom = -10
+            return
+
+        self.scale(factor, factor)
+
+    def reset_zoom(self):
+        """Reset zoom to fit view."""
+        self.resetTransform()
+        self._zoom = 0
+        if self.scene() and not self.scene().sceneRect().isEmpty():
+            self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def showEvent(self, event):
+        """Fit view when first shown."""
+        super().showEvent(event)
+        if self.scene() and not self.scene().sceneRect().isEmpty():
+            self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+
 class DetectionPreviewDialog(QDialog):
     """Non-modal dialog for previewing person detection results."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Detection Preview")
-        self.resize(800, 900)
+
+        # Size dialog larger - 80% of parent or default to large size
+        if parent:
+            # Try to get the main window if parent is smaller
+            main_window = parent
+            while main_window.parent():
+                main_window = main_window.parent()
+
+            parent_width = main_window.width()
+            parent_height = main_window.height()
+            dialog_width = int(parent_width * 0.8)
+            dialog_height = int(parent_height * 0.9)
+            self.resize(dialog_width, dialog_height)
+        else:
+            self.resize(1400, 1000)
+
         self.setModal(False)  # Non-modal allows adjusting settings in parent
 
         # Store data
@@ -72,15 +136,30 @@ class DetectionPreviewDialog(QDialog):
         self.settings_label.setWordWrap(True)
         layout.addWidget(self.settings_label)
 
-        # Image display with scroll area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setMinimumHeight(500)
+        # Loading indicator (prominent, centered)
+        self.loading_label = QLabel("⏳ Running detection, please wait...")
+        self.loading_label.setStyleSheet(
+            "color: #0066cc; font-weight: bold; font-size: 14px; "
+            "background-color: #e6f2ff; padding: 10px; border-radius: 5px;"
+        )
+        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading_label.hide()
+        layout.addWidget(self.loading_label)
 
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scroll_area.setWidget(self.image_label)
-        layout.addWidget(scroll_area)
+        # Zoom info layout
+        zoom_info_layout = QHBoxLayout()
+        self.zoom_label = QLabel("Mouse wheel to zoom, drag to pan")
+        self.zoom_label.setStyleSheet("color: #666; font-style: italic;")
+        zoom_info_layout.addWidget(self.zoom_label)
+        zoom_info_layout.addStretch()
+        layout.addLayout(zoom_info_layout)
+
+        # Image display with zoomable graphics view
+        self.graphics_view = ZoomableGraphicsView()
+        self.graphics_scene = QGraphicsScene()
+        self.graphics_view.setScene(self.graphics_scene)
+        self.graphics_view.setMinimumHeight(500)
+        layout.addWidget(self.graphics_view)
 
         # Detection count label
         self.detection_count_label = QLabel()
@@ -103,19 +182,33 @@ class DetectionPreviewDialog(QDialog):
         button_layout = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.run_detection)
+        self.fit_button = QPushButton("Fit to View")
+        self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.refresh_button)
+        button_layout.addWidget(self.fit_button)
         button_layout.addStretch()
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
 
     def set_image_and_settings(self, image_path: str, detection_settings: dict):
-        """Set the image path and detection settings, then run detection."""
+        """Set the image path and detection settings, then run detection after showing dialog."""
         self.image_path = image_path
         self.detection_settings = detection_settings
         self.update_settings_display()
-        self.run_detection()
+
+        # Clear previous results
+        self.graphics_scene.clear()
+        self.detection_count_label.setText("")
+        self.detection_table.setRowCount(0)
+
+        # Show loading indicator immediately
+        self.loading_label.show()
+        self.refresh_button.setEnabled(False)
+
+        # Defer detection to allow dialog to show first
+        QTimer.singleShot(100, self.run_detection)
 
     def update_settings_display(self):
         """Update the settings display label."""
@@ -132,6 +225,13 @@ class DetectionPreviewDialog(QDialog):
         """Run person detection and display results."""
         if not self.image_path:
             return
+
+        # Ensure loading indicator is shown and button disabled
+        if not self.loading_label.isVisible():
+            self.loading_label.show()
+        if self.refresh_button.isEnabled():
+            self.refresh_button.setEnabled(False)
+        QApplication.processEvents()  # Force UI update
 
         try:
             # Import here to avoid circular dependencies
@@ -159,10 +259,18 @@ class DetectionPreviewDialog(QDialog):
                 self.detection_settings.get('crop_padding', 10)
             )
 
-            # Convert to QPixmap and display
+            # Convert to QPixmap and display in graphics view
             annotated_image.save('/tmp/detection_preview.png')
             pixmap = QPixmap('/tmp/detection_preview.png')
-            self.image_label.setPixmap(pixmap)
+
+            # Clear and update scene
+            self.graphics_scene.clear()
+            pixmap_item = QGraphicsPixmapItem(pixmap)
+            self.graphics_scene.addItem(pixmap_item)
+            self.graphics_scene.setSceneRect(pixmap_item.boundingRect())
+
+            # Fit image to view on first load or refresh (delayed to allow layout)
+            QTimer.singleShot(50, self.graphics_view.reset_zoom)
 
             # Update detection count
             count = len(detections)
@@ -179,6 +287,11 @@ class DetectionPreviewDialog(QDialog):
                 "Detection Error",
                 f"Failed to run detection: {str(e)}"
             )
+
+        finally:
+            # Hide loading indicator and re-enable button
+            self.loading_label.hide()
+            self.refresh_button.setEnabled(True)
 
     def draw_detections(self, image: PilImage.Image, detections: list, padding: int) -> PilImage.Image:
         """Draw bounding boxes and padding on image."""
@@ -702,7 +815,7 @@ class CaptionSettingsForm(QVBoxLayout):
         if not parent:
             return
 
-        selected_indexes = parent.image_list.selectionModel().selectedIndexes()
+        selected_indexes = parent.image_list.list_view.selectionModel().selectedIndexes()
         if len(selected_indexes) != 1:
             QMessageBox.warning(
                 self.parentWidget(),
@@ -713,7 +826,7 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Get image path
         image_index = selected_indexes[0]
-        image = parent.image_list_model.get_image(image_index)
+        image = parent.image_list_model.data(image_index, Qt.ItemDataRole.UserRole)
         image_path = str(image.path)
 
         # Get current detection settings
@@ -794,7 +907,7 @@ class AutoCaptioner(QDockWidget):
             self.start_or_cancel_captioning)
 
         # Connect to selection changes to update preview button state
-        self.image_list.selectionModel().selectionChanged.connect(
+        self.image_list.list_view.selectionModel().selectionChanged.connect(
             self.update_preview_button_state)
 
         # Also connect to model changes
@@ -807,7 +920,7 @@ class AutoCaptioner(QDockWidget):
     @Slot()
     def update_preview_button_state(self):
         """Enable preview button only when 1 image selected and multi-person model selected."""
-        selected_count = len(self.image_list.selectionModel().selectedIndexes())
+        selected_count = len(self.image_list.list_view.selectionModel().selectedIndexes())
         model_id = self.caption_settings_form.model_combo_box.currentText()
         is_multi_person_model = 'multi-person' in model_id.lower()
 
