@@ -1,3 +1,4 @@
+import logging
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -5,14 +6,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image as PilImage, ImageDraw
 from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QFontMetrics, QImage, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
-from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
-                               QDockWidget, QFormLayout, QFrame,
+from PySide6.QtGui import QBrush, QFontMetrics, QImage, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
+from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QCheckBox,
+                               QDialog, QDockWidget, QFormLayout, QFrame,
                                QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QHeaderView, QLabel,
-                               QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QScrollArea, QSlider, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QLineEdit, QMessageBox, QPlainTextEdit,
+                               QProgressBar, QPushButton, QScrollArea, QSlider,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
@@ -30,6 +32,9 @@ from utils.settings_widgets import (FocusedScrollSettingsComboBox,
                                     SettingsPlainTextEdit)
 from utils.utils import pluralize
 from widgets.image_list import ImageList
+
+
+logger = logging.getLogger(__name__)
 
 
 def set_text_edit_height(text_edit: QPlainTextEdit, line_count: int):
@@ -105,16 +110,29 @@ class ZoomableGraphicsView(QGraphicsView):
             self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
     def mousePressEvent(self, event):
-        """Handle mouse press for painting."""
-        if self.edit_mode_enabled and self.detection_dialog and event.button() == Qt.MouseButton.LeftButton:
-            # Start painting
-            self.is_painting = True
-            # Convert view coordinates to scene coordinates
+        """Handle mouse press for painting, polygon select, or line drawing."""
+        if event.button() == Qt.MouseButton.LeftButton and self.detection_dialog:
             scene_pos = self.mapToScene(event.pos())
-            self.paint_at_position(scene_pos)
-        else:
-            # Default behavior (panning)
-            super().mousePressEvent(event)
+
+            # Handle polygon select mode
+            if self.detection_dialog.polygon_select_mode:
+                self.detection_dialog.add_polygon_point(scene_pos.x(), scene_pos.y())
+                return
+
+            # Handle split line mode
+            if self.detection_dialog.split_line_mode:
+                self.detection_dialog.add_split_line_point(scene_pos.x(), scene_pos.y())
+                return
+
+            # Handle painting mode
+            if self.edit_mode_enabled:
+                # Start painting
+                self.is_painting = True
+                self.paint_at_position(scene_pos)
+                return
+
+        # Default behavior (panning)
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         """Handle mouse move for painting."""
@@ -130,6 +148,10 @@ class ZoomableGraphicsView(QGraphicsView):
         """Handle mouse release."""
         if self.is_painting:
             self.is_painting = False
+            # Save masks when done painting
+            if self.detection_dialog and self.detection_dialog.pending_mask_save:
+                self.detection_dialog.save_edited_masks()
+                self.detection_dialog.pending_mask_save = False
         super().mouseReleaseEvent(event)
 
     def paint_at_position(self, scene_pos):
@@ -214,25 +236,81 @@ class DetectionPreviewDialog(QDialog):
         self.graphics_view.setMinimumHeight(500)
         layout.addWidget(self.graphics_view)
 
+        # Mode banner with action hints
+        self.mode_banner = QLabel("🟢 Normal Mode - Select a person to edit")
+        self.mode_banner.setStyleSheet("""
+            QLabel {
+                background-color: #4CAF50;
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 14px;
+                border-radius: 5px;
+            }
+        """)
+        self.mode_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.mode_banner)
+
         # Detection count label
         self.detection_count_label = QLabel()
-        self.detection_count_label.setStyleSheet("font-weight: bold;")
+        self.detection_count_label.setStyleSheet("font-weight: bold; padding: 5px;")
         layout.addWidget(self.detection_count_label)
 
-        # Detection info table
-        self.detection_table = QTableWidget()
-        self.detection_table.setColumnCount(4)
-        self.detection_table.setHorizontalHeaderLabels(
-            ["#", "Confidence", "Size (WxH)", "Bbox (x1,y1,x2,y2)"]
-        )
-        self.detection_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        self.detection_table.setMaximumHeight(150)
-        self.detection_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.detection_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.detection_table.itemSelectionChanged.connect(self.on_person_selected)
-        layout.addWidget(self.detection_table)
+        # Status footer
+        self.status_footer = QLabel()
+        self.status_footer.setStyleSheet("color: #666; padding: 5px;")
+        layout.addWidget(self.status_footer)
+
+        # Crop card gallery (replaces detection table)
+        self.cards_scroll = QScrollArea()
+        self.cards_scroll.setWidgetResizable(True)
+        self.cards_scroll.setMaximumHeight(280)
+        self.cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.cards_container = QWidget()
+        self.cards_layout = QHBoxLayout(self.cards_container)
+        self.cards_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.cards_layout.setSpacing(10)
+        self.cards_scroll.setWidget(self.cards_container)
+        layout.addWidget(self.cards_scroll)
+
+        # Properties panel for selected card
+        properties_frame = QFrame()
+        properties_frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        properties_layout = QHBoxLayout(properties_frame)
+
+        self.alias_label = QLabel("Alias:")
+        self.alias_input = QLineEdit()
+        self.alias_input.setPlaceholderText("e.g., singer, guitarist")
+        self.alias_input.textChanged.connect(self.on_alias_changed)
+
+        self.enabled_checkbox_panel = QCheckBox("Enabled for tagging")
+        self.enabled_checkbox_panel.setChecked(True)
+        self.enabled_checkbox_panel.stateChanged.connect(self.on_enabled_changed_panel)
+
+        self.inverse_button = QPushButton("Create Inverse")
+        self.inverse_button.setToolTip("Create a new person from everything except this person")
+        self.inverse_button.clicked.connect(self.create_inverse_crop)
+
+        self.delete_person_button = QPushButton("Delete")
+        self.delete_person_button.setToolTip("Delete this person")
+        self.delete_person_button.clicked.connect(self.delete_selected_person)
+        self.delete_person_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
+
+        properties_layout.addWidget(self.alias_label)
+        properties_layout.addWidget(self.alias_input)
+        properties_layout.addWidget(self.enabled_checkbox_panel)
+        properties_layout.addWidget(self.inverse_button)
+        properties_layout.addWidget(self.delete_person_button)
+        properties_layout.addStretch()
+
+        layout.addWidget(properties_frame)
+
+        # Track selected person
+        self.selected_card_index = None
+        self.person_cards = []  # List of card widgets
+        self.thumbnail_cache = {}  # Cache thumbnails: key = (index, bbox_tuple) -> QPixmap
 
         # Crop previews scroll area (initially hidden)
         self.crop_previews_label = QLabel("Crop Previews (what WD Tagger will see):")
@@ -285,6 +363,20 @@ class DetectionPreviewDialog(QDialog):
         self.selected_person_label = QLabel("No person selected")
         self.selected_person_label.setStyleSheet("font-weight: bold; color: #0066cc;")
 
+        self.finish_editing_button = QPushButton("✓ Finish Editing")
+        self.finish_editing_button.setToolTip("Save changes and update thumbnail for this person")
+        self.finish_editing_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        self.finish_editing_button.clicked.connect(self.finish_editing_person)
+
+        self.polygon_select_button = QPushButton("Polygon Select")
+        self.polygon_select_button.setToolTip("Draw a polygon to add/erase from mask")
+        self.polygon_select_button.clicked.connect(self.start_polygon_select)
+
+        self.finish_polygon_button = QPushButton("Finish Polygon")
+        self.finish_polygon_button.clicked.connect(self.finish_polygon_select)
+        self.finish_polygon_button.setVisible(False)
+        self.finish_polygon_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
+
         self.reset_masks_button = QPushButton("Reset All")
         self.reset_masks_button.setToolTip("Reset all masks to original state (in memory only)")
         self.reset_masks_button.clicked.connect(self.reset_masks)
@@ -301,6 +393,9 @@ class DetectionPreviewDialog(QDialog):
         mask_edit_layout.addWidget(self.brush_size_slider)
         mask_edit_layout.addWidget(self.brush_size_value_label)
         mask_edit_layout.addWidget(self.selected_person_label)
+        mask_edit_layout.addWidget(self.finish_editing_button)
+        mask_edit_layout.addWidget(self.polygon_select_button)
+        mask_edit_layout.addWidget(self.finish_polygon_button)
         mask_edit_layout.addStretch()
         mask_edit_layout.addWidget(self.reset_masks_button)
         mask_edit_layout.addWidget(self.delete_masks_button)
@@ -313,6 +408,9 @@ class DetectionPreviewDialog(QDialog):
         self.brush_size_slider.hide()
         self.brush_size_value_label.hide()
         self.selected_person_label.hide()
+        self.finish_editing_button.hide()
+        self.polygon_select_button.hide()
+        self.finish_polygon_button.hide()
         self.reset_masks_button.hide()
         self.delete_masks_button.hide()
 
@@ -321,18 +419,48 @@ class DetectionPreviewDialog(QDialog):
 
         # Buttons
         button_layout = QHBoxLayout()
-        self.refresh_button = QPushButton("Refresh")
+        self.reload_button = QPushButton("Reload")
+        self.reload_button.setToolTip("Reload saved detections and masks from disk")
+        self.reload_button.clicked.connect(self.reload_from_cache)
+        self.refresh_button = QPushButton("Re-detect")
+        self.refresh_button.setToolTip("Run fresh YOLO person detection and discard any edits")
         self.refresh_button.clicked.connect(self.run_detection)
         self.fit_button = QPushButton("Fit to View")
         self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
-        self.show_crops_button = QPushButton("Show Crops")
-        self.show_crops_button.clicked.connect(self.show_crop_previews)
-        self.show_crops_button.setEnabled(False)
+        # Show Crops button removed - card gallery already shows crops
+
+        # Quick toggle for split merged people (major performance impact)
+        self.split_merged_checkbox = QCheckBox("Split Merged People")
+        self.split_merged_checkbox.setToolTip(
+            "Automatically detect occluded/merged people using WD Tagger + iterative detection.\n"
+            "⚠️ Performance: ON = ~6s (automatic), OFF = ~0.4s (manual with Create Inverse)\n"
+            "Tip: For best speed, keep OFF and use 'Create Inverse' when needed."
+        )
+        # Initialize from settings
+        self.split_merged_checkbox.setChecked(self.detection_settings.get('split_merged_people', True))
+        self.split_merged_checkbox.stateChanged.connect(self.on_split_merged_changed)
+
+        self.add_person_button = QPushButton("Add Person")
+        self.add_person_button.clicked.connect(self.add_manual_person)
+        self.add_person_button.setEnabled(False)
+        self.add_person_button.setToolTip("Manually add a person by painting a mask")
+        self.split_by_line_button = QPushButton("Split by Line")
+        self.split_by_line_button.clicked.connect(self.start_split_by_line)
+        self.split_by_line_button.setEnabled(False)
+        self.split_by_line_button.setToolTip("Draw a multi-segment line to split image")
+        self.finish_line_button = QPushButton("Finish Line")
+        self.finish_line_button.clicked.connect(self.finish_split_line)
+        self.finish_line_button.setVisible(False)
+        self.finish_line_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.close)
+        button_layout.addWidget(self.reload_button)
         button_layout.addWidget(self.refresh_button)
         button_layout.addWidget(self.fit_button)
-        button_layout.addWidget(self.show_crops_button)
+        button_layout.addWidget(self.split_merged_checkbox)
+        button_layout.addWidget(self.add_person_button)
+        button_layout.addWidget(self.split_by_line_button)
+        button_layout.addWidget(self.finish_line_button)
         button_layout.addStretch()
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
@@ -342,24 +470,111 @@ class DetectionPreviewDialog(QDialog):
         self.brush_mode = 'paint'  # 'paint' or 'erase'
         self.original_detections = None  # Backup of original masks
         self.is_painting = False
+        self.current_display_scale = 1.0  # Scale factor for displayed image vs source
+        self.pending_mask_save = False  # Track if we need to save masks
+
+        # Polygon selection state
+        self.polygon_select_mode = False
+        self.polygon_points = []  # Points for polygon selection
+        self.redraw_timer = QTimer(self)
+        self.redraw_timer.setSingleShot(True)
+        self.redraw_timer.timeout.connect(self._do_redraw)
+        self.redraw_pending = False
+        self.adding_person_mode = False  # Track if we're adding a new person
+        self.new_person_mask = None  # Mask being painted for new person
+        self.split_line_mode = False  # Track if we're drawing a split line
+        self.split_line_points = []  # Points for the split line (multi-segment)
+        self.split_line_preview_side = None  # Which side to preview
+
+        # Preview-scale mask system for performance
+        self.preview_scale = 1.0  # Scale factor for preview
+        self.preview_size = None  # (width, height) of preview
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts."""
+        key = event.key()
+
+        # Esc - Cancel current mode
+        if key == Qt.Key.Key_Escape:
+            if self.split_line_mode:
+                self.cancel_split_by_line()
+            elif self.polygon_select_mode:
+                self.cancel_polygon_select()
+            elif self.adding_person_mode:
+                self.adding_person_mode = False
+                self.new_person_mask = None
+                self.add_person_button.setText("Add Person")
+                try:
+                    self.add_person_button.clicked.disconnect()
+                except:
+                    pass
+                self.add_person_button.clicked.connect(self.add_manual_person)
+                self.update_mode_banner()
+            event.accept()
+            return
+
+        # Del - Delete selected person
+        if key == Qt.Key.Key_Delete:
+            if self.selected_card_index is not None:
+                self.delete_selected_person()
+            event.accept()
+            return
+
+        # Ctrl+I - Create inverse
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_I:
+            if self.selected_card_index is not None:
+                self.create_inverse_crop()
+            event.accept()
+            return
+
+        # Number keys 1-9 - Select person
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+            person_index = key - Qt.Key.Key_1
+            if 0 <= person_index < len(self.person_cards):
+                self.select_card(person_index)
+            event.accept()
+            return
+
+        # Default handling
+        super().keyPressEvent(event)
 
     def set_image_and_settings(self, image_path: str, detection_settings: dict):
-        """Set the image path and detection settings, then run detection after showing dialog."""
+        """Set the image path and detection settings, then load cached or run fresh detection."""
         self.image_path = image_path
         self.detection_settings = detection_settings
         self.update_settings_display()
 
         # Clear previous results
         self.graphics_scene.clear()
-        self.detection_count_label.setText("")
-        self.detection_table.setRowCount(0)
+
+        # Clear previous crop cards
+        for card in self.person_cards:
+            card.deleteLater()
+        self.person_cards.clear()
+
+        # Clear previous crop previews
+        while self.crop_previews_layout.count():
+            item = self.crop_previews_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Reset selection
+        self.selected_card_index = None
+
+        # Hide edit mode if it was enabled
+        self.edit_mode_checkbox.setChecked(False)
+        self.toggle_edit_mode()
+
+        # Reset mode banner
+        self.update_mode_banner()
 
         # Show loading indicator immediately
         self.loading_label.show()
         self.refresh_button.setEnabled(False)
+        self.reload_button.setEnabled(False)
 
-        # Defer detection to allow dialog to show first
-        QTimer.singleShot(100, self.run_detection)
+        # Check for cached detections first, otherwise run fresh detection
+        QTimer.singleShot(100, self.load_or_run_detection)
 
     def update_settings_display(self):
         """Update the settings display label."""
@@ -377,10 +592,360 @@ class DetectionPreviewDialog(QDialog):
         )
         self.settings_label.setText(text)
 
-    def run_detection(self):
-        """Run person detection and display results."""
+    def load_or_run_detection(self):
+        """Load cached detections if available, otherwise run fresh detection."""
+        import time
+        start_time = time.time()
+        logger.info("=== load_or_run_detection: Checking for cached detections ===")
+
+        # Try to load cached detections first
+        load_start = time.time()
+        cached_detections = self.load_cached_detections()
+        load_time = time.time() - load_start
+        logger.info(f"⏱️  load_cached_detections took {load_time:.3f}s")
+
+        if cached_detections is not None:
+            logger.info(f"✓ Loaded {len(cached_detections)} cached detections from .masks.npz file - SKIPPING YOLO detection")
+            # Update loading text for cache loading
+            self.loading_label.setText("📁 Loading cached detections...")
+            display_start = time.time()
+            self.display_detections(cached_detections, from_cache=True)
+            display_time = time.time() - display_start
+            logger.info(f"⏱️  display_detections took {display_time:.3f}s")
+        else:
+            logger.info("✗ No cached detections found, running fresh YOLO detection...")
+            # Update loading text for fresh detection
+            self.loading_label.setText("⏳ Running detection, please wait...")
+            self.run_detection(force_redetect=False)
+
+        total_time = time.time() - start_time
+        logger.info(f"⏱️  TOTAL load_or_run_detection took {total_time:.3f}s")
+
+    def on_split_merged_changed(self, state):
+        """Handle split merged people checkbox state change."""
+        enabled = state == Qt.CheckState.Checked.value
+        self.detection_settings['split_merged_people'] = enabled
+        logger.info(f"Split merged people setting changed to: {enabled}")
+        logger.info(f"Click 'Re-detect' to apply the new setting (detection will be {'slower but automatic' if enabled else 'faster, use Create Inverse for missing people'})")
+
+    def reload_from_cache(self):
+        """Manually reload detections and masks from disk cache."""
+        logger.info("=== reload_from_cache: Manually reloading from disk ===")
+
         if not self.image_path:
             return
+
+        # Immediate visual feedback
+        self.reload_button.setEnabled(False)
+        self.reload_button.setText("Reloading...")
+        self.loading_label.setText("📁 Reloading from cache...")
+        self.loading_label.show()
+
+        # Clear thumbnail cache to force regeneration with updated masks
+        self.thumbnail_cache.clear()
+        logger.debug("Cleared thumbnail cache for reload")
+
+        try:
+            # Load cached detections
+            cached_detections = self.load_cached_detections()
+
+            if cached_detections is not None:
+                logger.info(f"✓ Reloaded {len(cached_detections)} cached detections from disk")
+                # Display with from_cache=False to clear thumbnail cache
+                self.display_detections(cached_detections, from_cache=False)
+                QMessageBox.information(
+                    self,
+                    "Reloaded",
+                    f"Successfully reloaded {len(cached_detections)} person(s) from disk cache."
+                )
+            else:
+                logger.warning("No cached detections found to reload")
+                QMessageBox.warning(
+                    self,
+                    "No Cache Found",
+                    "No saved detections found for this image. Try running detection first."
+                )
+        except Exception as e:
+            logger.error(f"Failed to reload from cache: {e}")
+            QMessageBox.critical(
+                self,
+                "Reload Error",
+                f"Failed to reload from cache: {str(e)}"
+            )
+        finally:
+            # Reset button state
+            self.reload_button.setEnabled(True)
+            self.reload_button.setText("Reload")
+            self.loading_label.hide()
+
+    def load_cached_detections(self):
+        """
+        Load cached detections from .masks.npz file.
+
+        Returns:
+            List of detection dictionaries if file exists, None otherwise
+        """
+        if not self.image_path:
+            return None
+
+        mask_file_path = Path(self.image_path).with_suffix(Path(self.image_path).suffix + '.masks.npz')
+
+        if not mask_file_path.exists():
+            return None
+
+        try:
+            # Load mask data
+            mask_data = np.load(mask_file_path, allow_pickle=True)
+
+            # Determine how many people are saved
+            saved_person_count = 0
+            for key in mask_data.keys():
+                if key.startswith('person_') and key.endswith('_bbox'):
+                    person_num = int(key.split('_')[1])
+                    saved_person_count = max(saved_person_count, person_num + 1)
+
+            if saved_person_count == 0:
+                logger.warning("No people found in cached detection file")
+                return None
+
+            # Reconstruct detections from saved data
+            detections = []
+            for i in range(saved_person_count):
+                person_key = f'person_{i}_mask'
+                bbox_key = f'person_{i}_bbox'
+                enabled_key = f'person_{i}_enabled'
+                alias_key = f'person_{i}_alias'
+
+                # Check if this person has required data
+                if bbox_key not in mask_data:
+                    logger.warning(f"Skipping person {i+1}: missing bbox data")
+                    continue
+
+                # Load bbox
+                saved_bbox = mask_data[bbox_key]
+                x1, y1, x2, y2 = saved_bbox
+
+                # Calculate detection properties
+                bbox_width = x2 - x1
+                bbox_height = y2 - y1
+                area = bbox_width * bbox_height
+                center_y = (y1 + y2) // 2
+
+                # Load mask if present
+                mask = None
+                if person_key in mask_data:
+                    mask = mask_data[person_key]
+
+                # Load enabled state (default True)
+                enabled = True
+                if enabled_key in mask_data:
+                    enabled_value = mask_data[enabled_key][0]
+                    enabled = bool(enabled_value)
+
+                # Load alias (default empty)
+                alias = ''
+                if alias_key in mask_data:
+                    alias_value = mask_data[alias_key][0]
+                    alias = str(alias_value) if alias_value else ''
+
+                # Create detection dictionary
+                detection = {
+                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                    'confidence': 1.0,  # Cached detections have confidence 1.0
+                    'area': int(area),
+                    'center_y': int(center_y),
+                    'mask': mask,
+                    'enabled': enabled,
+                    'alias': alias
+                }
+
+                detections.append(detection)
+
+            logger.info(f"Successfully loaded {len(detections)} detections from cache")
+            return detections if detections else None
+
+        except Exception as e:
+            logger.error(f"Failed to load cached detections: {e}")
+            return None
+
+    def display_detections(
+        self,
+        detections: list,
+        from_cache: bool = False,
+        use_segmentation: bool = False,
+        split_merged_people: bool = False,
+        original_detection_count: int = None,
+        mask_overlapping: bool = False,
+        masking_method: str = 'Bounding box'
+    ):
+        """
+        Display detection results in the preview dialog.
+
+        Args:
+            detections: List of detection dictionaries
+            from_cache: Whether detections are loaded from cache
+            use_segmentation: Whether segmentation was used
+            split_merged_people: Whether iterative detection was used
+            original_detection_count: Original count before iterative detection
+            mask_overlapping: Whether overlapping masking is enabled
+            masking_method: Method used for masking
+        """
+        import time
+        start_time = time.time()
+        try:
+            logger.info(f"=== display_detections: Displaying {len(detections)} detections (from_cache={from_cache}) ===")
+
+            # Load image
+            logger.debug("Loading image for display...")
+            load_img_start = time.time()
+            pil_image = PilImage.open(self.image_path).convert('RGB')
+            logger.info(f"⏱️  Load image took {time.time() - load_img_start:.3f}s")
+
+            # Store for re-drawing when person selected
+            self.current_detections = detections
+            self.current_image = pil_image
+            self.highlighted_person = None  # Reset highlight
+
+            # Draw bounding boxes and masking visualization
+            logger.debug("Drawing detection boundaries on image...")
+            draw_start = time.time()
+            annotated_image, scale_factor = self.draw_detections(
+                pil_image,
+                detections,
+                self.detection_settings.get('crop_padding', 10),
+                mask_overlapping,
+                masking_method,
+                self.highlighted_person
+            )
+            logger.info(f"⏱️  draw_detections took {time.time() - draw_start:.3f}s")
+
+            # Store scale factor for coordinate mapping during painting
+            self.current_display_scale = scale_factor
+            logger.debug(f"Display scale factor: {scale_factor:.3f}")
+
+            # Convert PIL Image to QPixmap in memory (no disk I/O)
+            # Use direct numpy conversion instead of PNG serialization for speed
+            logger.debug("Converting to QPixmap...")
+            convert_start = time.time()
+
+            # Convert PIL to numpy array
+            img_array = np.array(annotated_image)
+            height, width, channels = img_array.shape
+            bytes_per_line = channels * width
+
+            # Create QImage directly from numpy array
+            qimage = QImage(img_array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+
+            # QImage doesn't own the data, so we need to keep the numpy array alive
+            # Copy the QImage to detach it from the numpy array
+            qimage = qimage.copy()
+
+            pixmap = QPixmap.fromImage(qimage)
+            logger.info(f"⏱️  Convert to QPixmap took {time.time() - convert_start:.3f}s")
+
+            # Clear and update scene
+            logger.debug("Updating scene...")
+            scene_start = time.time()
+            self.graphics_scene.clear()
+            pixmap_item = QGraphicsPixmapItem(pixmap)
+            self.graphics_scene.addItem(pixmap_item)
+            self.graphics_scene.setSceneRect(pixmap_item.boundingRect())
+            logger.info(f"⏱️  Update scene took {time.time() - scene_start:.3f}s")
+
+            # Fit image to view on first load or refresh (delayed to allow layout)
+            QTimer.singleShot(50, self.graphics_view.reset_zoom)
+
+            # Update detection count label
+            count = len(detections)
+            masks_present = any(d.get('mask') is not None for d in detections)
+
+            if from_cache:
+                # Indicate these are cached detections
+                cache_indicator = "📁 Loaded from cache"
+                num_with_masks = sum(1 for d in detections if d.get('mask') is not None)
+                mask_info = f" ({num_with_masks} with masks)" if num_with_masks > 0 else ""
+                self.detection_count_label.setText(
+                    f"{cache_indicator} - {count} {'person' if count == 1 else 'people'}{mask_info}"
+                )
+            else:
+                # Fresh detection
+                mask_info = f" (segmentation masks: {'yes' if masks_present else 'no'})" if use_segmentation else ""
+
+                # Show iterative detection info if applied
+                iteration_info = ""
+                if split_merged_people and original_detection_count is not None and original_detection_count != count:
+                    iteration_info = f" [iterative: initial={original_detection_count}]"
+
+                self.detection_count_label.setText(
+                    f"{count} {'person' if count == 1 else 'people'} detected{iteration_info}{mask_info}"
+                )
+
+            # Update crop cards
+            logger.debug(f"Generating crop card thumbnails for {len(detections)} people...")
+            cards_start = time.time()
+            self.update_crop_cards(detections, from_cache=from_cache)
+            logger.info(f"⏱️  update_crop_cards took {time.time() - cards_start:.3f}s")
+            logger.debug("Crop card generation complete")
+
+            # Enable mask editing if we have detections with masks
+            has_masks = any(d.get('mask') is not None for d in detections)
+            self.mask_edit_container.setVisible(has_masks)
+
+            # Enable add person button if image is available
+            self.add_person_button.setEnabled(self.current_image is not None)
+
+            # Enable split by line button if we have an image
+            self.split_by_line_button.setEnabled(self.current_image is not None)
+
+            # Save masks automatically after fresh detection for faster subsequent loads
+            if not from_cache and has_masks:
+                save_start = time.time()
+                self.save_edited_masks()
+                logger.info(f"⏱️  Auto-saved masks to cache in {time.time() - save_start:.3f}s")
+
+            # For cached detections, auto-enable edit mode if masks exist
+            if from_cache and has_masks:
+                self.edit_mode_checkbox.setChecked(True)
+                self.toggle_edit_mode()
+                # Re-draw to show loaded masks
+                self.redraw_with_highlight()
+
+            total_display_time = time.time() - start_time
+            logger.info(f"⏱️  TOTAL display_detections took {total_display_time:.3f}s")
+
+        except Exception as e:
+            logger.error(f"Failed to display detections: {e}")
+            QMessageBox.critical(
+                self,
+                "Display Error",
+                f"Failed to display detections: {str(e)}"
+            )
+
+        finally:
+            # Hide loading indicator and re-enable buttons
+            self.loading_label.setText("⏳ Running detection, please wait...")  # Reset text
+            self.loading_label.hide()
+            self.refresh_button.setEnabled(True)
+            self.refresh_button.setText("Re-detect")  # Reset button text
+            self.reload_button.setEnabled(True)
+
+    def run_detection(self, force_redetect: bool = True):
+        """Run person detection and display results.
+
+        Args:
+            force_redetect: If True, always run detection. If False, check cache first.
+        """
+        import time
+        logger.info("=== run_detection: Starting YOLO person detection ===")
+
+        if not self.image_path:
+            return
+
+        # Immediate visual feedback
+        self.refresh_button.setEnabled(False)
+        self.refresh_button.setText("Detecting...")
+        self.loading_label.setText("⏳ Running detection, please wait...")
+        self.loading_label.show()
 
         # Refresh settings from parent form if available
         if self.settings_form:
@@ -418,22 +983,30 @@ class DetectionPreviewDialog(QDialog):
             use_segmentation = (mask_overlapping and masking_method == 'Segmentation') or split_merged_people
 
             # Create PersonDetector with current settings
+            # Auto-detect device (will use CUDA if available)
+            import torch
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            logger.info(f"Creating YOLO detector (model size: {self.detection_settings.get('yolo_model_size', 'm')}, segmentation: {use_segmentation}, device: {device})")
+            detector_start = time.time()
             detector = PersonDetector(
                 model_size=self.detection_settings.get('yolo_model_size', 'm'),
-                device='cpu',  # Use CPU for preview to avoid GPU memory issues
+                device=device,
                 conf_threshold=self.detection_settings.get('detection_confidence', 0.5),
                 min_size=self.detection_settings.get('detection_min_size', 50),
                 max_people=self.detection_settings.get('detection_max_people', 10),
                 use_segmentation=use_segmentation
             )
+            logger.info(f"⏱️  YOLO model loading took {time.time() - detector_start:.3f}s")
 
             # Apply split merged people if enabled
             if split_merged_people:
+                logger.info("Running iterative detection (split merged people enabled)")
                 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
                 from auto_captioning.models.wd_tagger import WdTaggerModel
                 import numpy as np
 
                 # Load image for WD Tagger
+                wd_start = time.time()
                 pil_image = PilImage.open(self.image_path).convert('RGBA')
 
                 # Initialize WD Tagger model (using default model)
@@ -461,94 +1034,53 @@ class DetectionPreviewDialog(QDialog):
 
                 # Parse expected person count
                 expected_person_count = MultiPersonTagger.parse_person_count_from_tags(full_image_tags)
+                logger.info(f"⏱️  WD Tagger preprocessing took {time.time() - wd_start:.3f}s")
 
                 # Use iterative detection if we expect people
                 if expected_person_count > 0:
+                    logger.info(f"🔍 Running YOLO iterative detection (expecting {expected_person_count} people)...")
+                    yolo_start = time.time()
                     detections, original_detection_count = detector.detect_people_iteratively(
                         self.image_path,
                         expected_person_count,
                         max_iterations=3
                     )
+                    logger.info(f"⏱️  YOLO iterative detection took {time.time() - yolo_start:.3f}s")
+                    logger.info(f"✓ YOLO detection complete: found {len(detections)} people")
                 else:
                     # No expected people, use standard detection
+                    logger.info("🔍 Running YOLO standard detection...")
                     detections = detector.detect_people(self.image_path)
                     original_detection_count = len(detections)
+                    logger.info(f"✓ YOLO detection complete: found {len(detections)} people")
             else:
                 # Standard detection (no splitting)
+                logger.info("🔍 Running YOLO standard detection...")
                 detections = detector.detect_people(self.image_path)
                 original_detection_count = len(detections)
+                logger.info(f"✓ YOLO detection complete: found {len(detections)} people")
 
-            # Load image
-            pil_image = PilImage.open(self.image_path).convert('RGB')
-
-            # Store for re-drawing when person selected
-            self.current_detections = detections
-            self.current_image = pil_image
-            self.highlighted_person = None  # Reset highlight
-
-            # Draw bounding boxes and masking visualization
-            annotated_image = self.draw_detections(
-                pil_image,
+            # Display the detection results
+            self.display_detections(
                 detections,
-                self.detection_settings.get('crop_padding', 10),
-                mask_overlapping,
-                masking_method,
-                self.highlighted_person
+                from_cache=False,
+                use_segmentation=use_segmentation,
+                split_merged_people=split_merged_people,
+                original_detection_count=original_detection_count,
+                mask_overlapping=mask_overlapping,
+                masking_method=masking_method
             )
-
-            # Convert PIL Image to QPixmap in memory (no disk I/O)
-            buffer = BytesIO()
-            annotated_image.save(buffer, format='PNG')
-            buffer.seek(0)
-            qimage = QImage.fromData(buffer.getvalue())
-            pixmap = QPixmap.fromImage(qimage)
-
-            # Clear and update scene
-            self.graphics_scene.clear()
-            pixmap_item = QGraphicsPixmapItem(pixmap)
-            self.graphics_scene.addItem(pixmap_item)
-            self.graphics_scene.setSceneRect(pixmap_item.boundingRect())
-
-            # Fit image to view on first load or refresh (delayed to allow layout)
-            QTimer.singleShot(50, self.graphics_view.reset_zoom)
-
-            # Update detection count
-            count = len(detections)
-            # Check if segmentation masks are present
-            masks_present = any(d.get('mask') is not None for d in detections)
-            mask_info = f" (segmentation masks: {'yes' if masks_present else 'no'})" if use_segmentation else ""
-
-            # Show iterative detection info if applied
-            iteration_info = ""
-            if split_merged_people and original_detection_count != count:
-                iteration_info = f" [iterative: initial={original_detection_count}]"
-
-            self.detection_count_label.setText(
-                f"{count} {'person' if count == 1 else 'people'} detected{iteration_info}{mask_info}"
-            )
-
-            # Update table
-            self.update_detection_table(detections)
-
-            # Enable show crops button if we have detections
-            self.show_crops_button.setEnabled(len(detections) > 0)
-
-            # Enable mask editing if we have detections with masks
-            has_masks = any(d.get('mask') is not None for d in detections)
-            self.mask_edit_container.setVisible(has_masks)
 
         except Exception as e:
+            # Hide loading indicator and re-enable button on error
+            self.loading_label.hide()
+            self.refresh_button.setEnabled(True)
+
             QMessageBox.critical(
                 self,
                 "Detection Error",
                 f"Failed to run detection: {str(e)}"
             )
-
-        finally:
-            # Hide loading indicator and re-enable button
-            self.loading_label.setText("⏳ Running detection, please wait...")  # Reset text
-            self.loading_label.hide()
-            self.refresh_button.setEnabled(True)
 
     def draw_detections(
         self,
@@ -558,16 +1090,53 @@ class DetectionPreviewDialog(QDialog):
         mask_overlapping: bool = False,
         masking_method: str = 'Bounding box',
         highlighted_person: int = None
-    ) -> PilImage.Image:
+    ) -> tuple[PilImage.Image, float]:
         """Draw bounding boxes, padding, and masking visualization on image.
 
         Args:
             highlighted_person: If set, only show masking for this person's crop region
+
+        Returns:
+            Tuple of (annotated_image, scale_factor) where scale_factor is the ratio
+            of display size to original size
         """
         import numpy as np
 
-        # Make a copy to draw on
-        img_copy = image.copy()
+        # Performance optimization: work at preview resolution for large images
+        # This makes boundary drawing and visualization MUCH faster
+        max_preview_dimension = 2000  # Max width or height for preview
+        original_size = image.size
+        scale_factor = 1.0
+
+        if max(original_size) > max_preview_dimension:
+            scale_factor = max_preview_dimension / max(original_size)
+            new_size = (int(original_size[0] * scale_factor), int(original_size[1] * scale_factor))
+            img_copy = image.resize(new_size, PilImage.Resampling.LANCZOS)
+            logger.debug(f"Resized image from {original_size} to {new_size} for faster visualization (scale={scale_factor:.2f})")
+
+            # Scale detection data
+            scaled_detections = []
+            for det in detections:
+                scaled_det = det.copy()
+                # Scale bbox
+                bbox = det['bbox']
+                scaled_det['bbox'] = [int(coord * scale_factor) for coord in bbox]
+                # Scale mask if present
+                if det.get('mask') is not None:
+                    mask = det['mask']
+                    # Resize mask using PIL for quality
+                    mask_img = PilImage.fromarray((mask * 255).astype(np.uint8))
+                    mask_resized = mask_img.resize(new_size, PilImage.Resampling.NEAREST)
+                    scaled_det['mask'] = np.array(mask_resized) > 127
+                else:
+                    scaled_det['mask'] = None
+                scaled_detections.append(scaled_det)
+
+            detections = scaled_detections
+            padding = int(padding * scale_factor)
+        else:
+            # No scaling needed
+            img_copy = image.copy()
 
         # If masking is enabled and we have multiple people, show masking visualization
         if mask_overlapping and len(detections) > 1:
@@ -723,23 +1292,192 @@ class DetectionPreviewDialog(QDialog):
             # Simple text position - top left of bbox
             draw.text((x1 + 5, y1 + 5), text, fill=color)
 
-        return img_copy
+        return img_copy, scale_factor
+
+    def on_alias_changed(self):
+        """Handle alias text change in properties panel."""
+        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
+            return
+
+        new_alias = self.alias_input.text().strip()
+        self.current_detections[self.selected_card_index]['alias'] = new_alias
+
+        # Update only the specific card's label (not regenerating all cards)
+        if self.selected_card_index < len(self.person_cards):
+            card = self.person_cards[self.selected_card_index]
+            # Find the info label (second child in the card's layout)
+            card_layout = card.layout()
+            if card_layout and card_layout.count() >= 2:
+                info_label = card_layout.itemAt(1).widget()
+                if isinstance(info_label, QLabel):
+                    label_text = new_alias if new_alias else f"Person {self.selected_card_index + 1}"
+                    enabled = self.current_detections[self.selected_card_index].get('enabled', True)
+                    if not enabled:
+                        info_label.setText(f"{label_text}\n🚫 Disabled")
+                    else:
+                        info_label.setText(label_text)
+
+        # Save to sidecar
+        self.save_edited_masks()
+        logger.info(f"Person {self.selected_card_index + 1} alias set to: '{new_alias}'")
+
+    def on_enabled_changed_panel(self, state):
+        """Handle enabled checkbox change in properties panel."""
+        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
+            return
+
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.current_detections[self.selected_card_index]['enabled'] = enabled
+
+        # Update only the specific card's appearance
+        if self.selected_card_index < len(self.person_cards):
+            card = self.person_cards[self.selected_card_index]
+            card_layout = card.layout()
+            if card_layout and card_layout.count() >= 2:
+                info_label = card_layout.itemAt(1).widget()
+                if isinstance(info_label, QLabel):
+                    alias = self.current_detections[self.selected_card_index].get('alias', '')
+                    label_text = alias if alias else f"Person {self.selected_card_index + 1}"
+                    if not enabled:
+                        info_label.setText(f"{label_text}\n🚫 Disabled")
+                        info_label.setStyleSheet("color: #f44336; font-weight: bold;")
+                        card.setStyleSheet("QFrame { opacity: 0.5; border: 3px solid #2196F3; }")
+                    else:
+                        info_label.setText(label_text)
+                        info_label.setStyleSheet("font-weight: bold;")
+                        card.setStyleSheet("QFrame { border: 3px solid #2196F3; }")
+
+        # Update status footer
+        self.update_status_footer()
+
+        # Save to sidecar
+        self.save_edited_masks()
+        logger.info(f"Person {self.selected_card_index + 1} {'enabled' if enabled else 'disabled'}")
+
+    def create_inverse_crop(self):
+        """Create a new person from the inverse of the selected person."""
+        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
+            return
+
+        detection = self.current_detections[self.selected_card_index]
+        mask = detection.get('mask')
+
+        if mask is None:
+            QMessageBox.warning(
+                self,
+                "No Mask",
+                "Selected person has no segmentation mask. Inverse crop requires a mask."
+            )
+            return
+
+        # Create inverse mask
+        inverse_mask = ~mask
+
+        # Check if there are any pixels
+        if not inverse_mask.any():
+            QMessageBox.warning(
+                self,
+                "Empty Mask",
+                "The inverse would be empty."
+            )
+            return
+
+        # Calculate bounding box
+        mask_coords = np.argwhere(inverse_mask)
+        y_coords = mask_coords[:, 0]
+        x_coords = mask_coords[:, 1]
+
+        x1 = int(x_coords.min())
+        y1 = int(y_coords.min())
+        x2 = int(x_coords.max())
+        y2 = int(y_coords.max())
+
+        bbox = [x1, y1, x2, y2]
+        width = x2 - x1
+        height = y2 - y1
+        area = width * height
+        center_y = (y1 + y2) // 2
+
+        # Smart alias suggestion
+        original_alias = detection.get('alias', '')
+        if original_alias:
+            suggested_alias = f"{original_alias} inverse"
+        else:
+            suggested_alias = f"person{self.selected_card_index + 1} inverse"
+
+        # Create new detection
+        new_detection = {
+            'bbox': bbox,
+            'confidence': 1.0,
+            'area': area,
+            'center_y': center_y,
+            'mask': inverse_mask,
+            'enabled': True,
+            'alias': suggested_alias
+        }
+
+        # Add to detections
+        self.current_detections.append(new_detection)
+
+        # Update cards
+        self.update_crop_cards(self.current_detections)
+
+        # Save
+        self.save_edited_masks()
+
+        # Redraw
+        self.redraw_with_highlight()
+
+        logger.info(f"Created inverse crop: {suggested_alias}")
+        QMessageBox.information(
+            self,
+            "Person Added",
+            f"Inverse person created: '{suggested_alias}'"
+        )
+
+    def delete_selected_person(self):
+        """Delete the selected person."""
+        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
+            return
+
+        detection = self.current_detections[self.selected_card_index]
+        alias = detection.get('alias', '')
+        label = alias if alias else f"Person {self.selected_card_index + 1}"
+
+        # Confirmation
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete '{label}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Remove from detections
+        del self.current_detections[self.selected_card_index]
+
+        # Update cards
+        self.update_crop_cards(self.current_detections)
+
+        # Save
+        self.save_edited_masks()
+
+        # Redraw
+        self.redraw_with_highlight()
+
+        logger.info(f"Deleted person: {label}")
 
     def on_person_selected(self):
-        """Handle person selection in detection table."""
-        selected_rows = self.detection_table.selectedItems()
-        if not selected_rows or not self.current_image or not self.current_detections:
-            return
-
-        # Get selected row index
-        row = self.detection_table.currentRow()
-        if row < 0 or row >= len(self.current_detections):
-            return
+        """Handle person selection in detection table (deprecated - now using cards)."""
+        # This method is kept for backward compatibility but cards use select_card() instead
+        pass
 
         # Show loading indicator
         self.loading_label.setText(f"⏳ Updating preview for Person {row+1}...")
         self.loading_label.show()
-        self.detection_table.setEnabled(False)
         QApplication.processEvents()
 
         # Set highlighted person and defer redraw to allow UI update
@@ -751,25 +1489,77 @@ class DetectionPreviewDialog(QDialog):
 
         QTimer.singleShot(50, self.redraw_with_highlight)
 
+    def schedule_redraw(self):
+        """Schedule a redraw with debouncing to avoid excessive redraws during painting."""
+        if not self.redraw_timer.isActive():
+            # Start timer for 50ms (fast enough to feel responsive, slow enough to batch updates)
+            self.redraw_timer.start(50)
+
+    def _do_redraw(self):
+        """Internal method called by timer to perform the actual redraw."""
+        self.redraw_with_highlight()
+
     def redraw_with_highlight(self):
         """Redraw the image with the selected person highlighted."""
-        if not self.current_image or not self.current_detections:
+        if not self.current_image:
             return
 
-        try:
-            mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
-            masking_method = self.detection_settings.get('masking_method', 'Bounding box')
+        # If adding a person, show the new mask being painted
+        if self.adding_person_mode and self.new_person_mask is not None:
+            # Create a temporary detection for visualization
+            temp_detections = list(self.current_detections) if self.current_detections else []
 
-            # Draw with highlighted person
-            annotated_image = self.draw_detections(
+            # Add temporary detection for the new person being painted
+            if self.new_person_mask.any():
+                mask_coords = np.argwhere(self.new_person_mask)
+                y_coords = mask_coords[:, 0]
+                x_coords = mask_coords[:, 1]
+                x1 = int(x_coords.min())
+                y1 = int(y_coords.min())
+                x2 = int(x_coords.max())
+                y2 = int(y_coords.max())
+
+                temp_detection = {
+                    'bbox': [x1, y1, x2, y2],
+                    'confidence': 1.0,
+                    'mask': self.new_person_mask
+                }
+                temp_detections.append(temp_detection)
+
+            # Draw with the temporary detection
+            annotated_image, scale_factor = self.draw_detections(
                 self.current_image,
-                self.current_detections,
+                temp_detections,
                 self.detection_settings.get('crop_padding', 10),
-                mask_overlapping,
-                masking_method,
-                self.highlighted_person
+                False,  # No masking during add mode
+                'Segmentation',
+                len(temp_detections) - 1 if temp_detections else None  # Highlight the new person
             )
+            self.current_display_scale = scale_factor
+        elif not self.current_detections:
+            # No detections, just show the image
+            annotated_image = self.current_image
+            self.current_display_scale = 1.0
+        else:
+            try:
+                mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
+                masking_method = self.detection_settings.get('masking_method', 'Bounding box')
 
+                # Draw with highlighted person
+                annotated_image, scale_factor = self.draw_detections(
+                    self.current_image,
+                    self.current_detections,
+                    self.detection_settings.get('crop_padding', 10),
+                    mask_overlapping,
+                    masking_method,
+                    self.highlighted_person
+                )
+                self.current_display_scale = scale_factor
+            except Exception as e:
+                logger.error(f"Error drawing detections: {e}")
+                annotated_image = self.current_image
+
+        try:
             # Convert and display
             buffer = BytesIO()
             annotated_image.save(buffer, format='PNG')
@@ -783,10 +1573,47 @@ class DetectionPreviewDialog(QDialog):
             self.graphics_scene.addItem(pixmap_item)
             self.graphics_scene.setSceneRect(pixmap_item.boundingRect())
 
+            # Draw split line if in split line mode
+            if self.split_line_mode and self.split_line_points:
+                pen = QPen(Qt.GlobalColor.yellow, 3, Qt.PenStyle.DashLine)
+
+                # Draw points
+                for px, py in self.split_line_points:
+                    self.graphics_scene.addEllipse(px - 5, py - 5, 10, 10, pen)
+
+                # Draw line if we have 2 points
+                if len(self.split_line_points) >= 2:
+                    x1, y1 = self.split_line_points[0]
+                    x2, y2 = self.split_line_points[1]
+                    self.graphics_scene.addLine(x1, y1, x2, y2, pen)
+
+            # Draw polygon if in polygon select mode
+            if self.polygon_select_mode and self.polygon_points:
+                pen = QPen(Qt.GlobalColor.magenta, 3, Qt.PenStyle.SolidLine)
+                point_pen = QPen(Qt.GlobalColor.magenta, 2, Qt.PenStyle.SolidLine)
+                point_brush = QBrush(Qt.GlobalColor.magenta)
+
+                # Draw points
+                for px, py in self.polygon_points:
+                    self.graphics_scene.addEllipse(px - 6, py - 6, 12, 12, point_pen, point_brush)
+
+                # Draw lines connecting points
+                if len(self.polygon_points) >= 2:
+                    for i in range(len(self.polygon_points) - 1):
+                        x1, y1 = self.polygon_points[i]
+                        x2, y2 = self.polygon_points[i + 1]
+                        self.graphics_scene.addLine(x1, y1, x2, y2, pen)
+
+                    # Draw closing line if we have 3+ points (dotted)
+                    if len(self.polygon_points) >= 3:
+                        closing_pen = QPen(Qt.GlobalColor.magenta, 2, Qt.PenStyle.DashLine)
+                        x1, y1 = self.polygon_points[-1]
+                        x2, y2 = self.polygon_points[0]
+                        self.graphics_scene.addLine(x1, y1, x2, y2, closing_pen)
+
         finally:
-            # Hide loading indicator and re-enable table
+            # Hide loading indicator
             self.loading_label.hide()
-            self.detection_table.setEnabled(True)
 
     def toggle_edit_mode(self):
         """Toggle mask editing mode."""
@@ -801,6 +1628,8 @@ class DetectionPreviewDialog(QDialog):
             self.brush_size_slider.show()
             self.brush_size_value_label.show()
             self.selected_person_label.show()
+            self.finish_editing_button.show()
+            self.polygon_select_button.show()
             self.reset_masks_button.show()
 
             # Backup original masks
@@ -812,7 +1641,7 @@ class DetectionPreviewDialog(QDialog):
             if self.highlighted_person is not None:
                 self.selected_person_label.setText(f"Editing: Person {self.highlighted_person + 1}")
             else:
-                self.selected_person_label.setText("Select a person from the table")
+                self.selected_person_label.setText("Select a person from the card gallery")
 
             # Enable painting on graphics view
             self.graphics_view.edit_mode_enabled = True
@@ -828,11 +1657,231 @@ class DetectionPreviewDialog(QDialog):
             self.brush_size_slider.hide()
             self.brush_size_value_label.hide()
             self.selected_person_label.hide()
+            self.finish_editing_button.hide()
+            self.polygon_select_button.hide()
+            self.finish_polygon_button.hide()
             self.reset_masks_button.hide()
 
             # Disable painting and restore panning
             self.graphics_view.edit_mode_enabled = False
             self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def finish_editing_person(self):
+        """Finish editing the current person - save and update thumbnail."""
+        if self.highlighted_person is None or self.highlighted_person >= len(self.current_detections):
+            QMessageBox.warning(
+                self,
+                "No Person Selected",
+                "Please select a person to finish editing."
+            )
+            return
+
+        person_index = self.highlighted_person
+
+        # Save masks to disk
+        self.save_edited_masks()
+
+        # Clear thumbnail cache for this person
+        self.clear_thumbnail_cache_for_person(person_index)
+
+        # Regenerate the card for this person
+        if person_index < len(self.person_cards):
+            # Remove old card
+            old_card = self.person_cards[person_index]
+            self.cards_layout.removeWidget(old_card)
+            old_card.deleteLater()
+
+            # Create new card with fresh thumbnail
+            detection = self.current_detections[person_index]
+            new_card = self._create_crop_card(person_index, detection)
+            self.person_cards[person_index] = new_card
+
+            # Insert at correct position
+            self.cards_layout.insertWidget(person_index, new_card)
+
+            # Reselect the card
+            self.select_card(person_index)
+
+        logger.info(f"Finished editing Person {person_index + 1} - thumbnail updated")
+
+        # Give visual feedback
+        self.finish_editing_button.setText("✓ Saved!")
+        QTimer.singleShot(1500, lambda: self.finish_editing_button.setText("✓ Finish Editing"))
+
+    def start_polygon_select(self):
+        """Start polygon selection mode for adding/erasing mask regions."""
+        if self.highlighted_person is None or self.highlighted_person >= len(self.current_detections):
+            QMessageBox.warning(
+                self,
+                "No Person Selected",
+                "Please select a person to edit with polygon selection."
+            )
+            return
+
+        # Cancel any other active modes
+        if self.split_line_mode:
+            self.cancel_split_by_line()
+
+        self.polygon_select_mode = True
+        self.polygon_points = []
+
+        # Update UI with immediate visual feedback
+        self.polygon_select_button.setText("Cancel Polygon")
+        self.polygon_select_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
+        try:
+            self.polygon_select_button.clicked.disconnect()
+        except:
+            pass
+        self.polygon_select_button.clicked.connect(self.cancel_polygon_select)
+        self.selected_person_label.setText("🟣 POLYGON SELECT MODE - Click points to draw polygon, then 'Finish Polygon'")
+        self.selected_person_label.setStyleSheet("background-color: #9C27B0; color: white; padding: 5px; font-weight: bold;")
+        self.selected_person_label.show()
+        self.finish_polygon_button.setVisible(False)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        logger.info("Entered polygon selection mode")
+
+    def cancel_polygon_select(self):
+        """Cancel polygon selection mode."""
+        self.polygon_select_mode = False
+        self.polygon_points = []
+
+        # Update UI
+        self.polygon_select_button.setText("Polygon Select")
+        self.polygon_select_button.setStyleSheet("")  # Reset style
+        try:
+            self.polygon_select_button.clicked.disconnect()
+        except:
+            pass
+        self.polygon_select_button.clicked.connect(self.start_polygon_select)
+        if self.highlighted_person is not None:
+            self.selected_person_label.setText(f"Editing: Person {self.highlighted_person + 1}")
+            self.selected_person_label.setStyleSheet("")  # Reset style
+        self.finish_polygon_button.setVisible(False)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        # Redraw to remove polygon
+        self.redraw_with_highlight()
+
+        logger.info("Cancelled polygon selection mode")
+
+    def add_polygon_point(self, x: float, y: float):
+        """Add a point to the polygon, clamping to image bounds."""
+        # Clamp coordinates to displayed image bounds
+        # Get scene rect which represents the displayed image dimensions
+        scene_rect = self.graphics_scene.sceneRect()
+        clamped_x = max(0, min(x, scene_rect.width() - 1))
+        clamped_y = max(0, min(y, scene_rect.height() - 1))
+
+        self.polygon_points.append((int(clamped_x), int(clamped_y)))
+
+        if (clamped_x != x or clamped_y != y):
+            logger.debug(f"Clamped polygon point from ({x:.0f}, {y:.0f}) to ({clamped_x:.0f}, {clamped_y:.0f})")
+
+        # Update UI
+        num_points = len(self.polygon_points)
+        if num_points == 1:
+            self.selected_person_label.setText("Click more points, then 'Finish Polygon'")
+        else:
+            self.selected_person_label.setText(f"{num_points} points - Click more or 'Finish Polygon'")
+
+        # Show finish button after 3+ points (minimum for polygon)
+        if num_points >= 3:
+            self.finish_polygon_button.setVisible(True)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        # Redraw to show the polygon
+        self.redraw_with_highlight()
+
+    def finish_polygon_select(self):
+        """Finish the polygon and apply to mask."""
+        if len(self.polygon_points) < 3:
+            QMessageBox.warning(
+                self,
+                "Not Enough Points",
+                "Please add at least 3 points to create a polygon."
+            )
+            return
+
+        if self.highlighted_person is None or self.highlighted_person >= len(self.current_detections):
+            return
+
+        # Ask whether to add or erase
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QRadioButton, QDialogButtonBox, QLabel
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Apply Polygon")
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel("Choose how to apply the polygon:")
+        layout.addWidget(label)
+
+        add_radio = QRadioButton("Add to mask")
+        add_radio.setChecked(True)
+        erase_radio = QRadioButton("Erase from mask")
+
+        layout.addWidget(add_radio)
+        layout.addWidget(erase_radio)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        add_to_mask = add_radio.isChecked()
+
+        # Get current person's mask
+        detection = self.current_detections[self.highlighted_person]
+        mask = detection.get('mask')
+        if mask is None:
+            QMessageBox.warning(
+                self,
+                "No Mask",
+                "Selected person has no mask to edit."
+            )
+            return
+
+        # Scale polygon points from display to full-resolution
+        scaled_points = []
+        for x, y in self.polygon_points:
+            if self.current_display_scale != 1.0:
+                x = int(x / self.current_display_scale)
+                y = int(y / self.current_display_scale)
+            scaled_points.append((x, y))
+
+        # Create polygon mask using cv2.fillPoly
+        import cv2
+        height, width = mask.shape
+        polygon_mask = np.zeros((height, width), dtype=np.uint8)
+        poly_points = np.array(scaled_points, dtype=np.int32)
+        cv2.fillPoly(polygon_mask, [poly_points], 255)
+        polygon_mask = polygon_mask > 0
+
+        # Apply to mask
+        if add_to_mask:
+            mask |= polygon_mask
+        else:
+            mask &= ~polygon_mask
+
+        detection['mask'] = mask
+
+        # Exit polygon select mode
+        self.cancel_polygon_select()
+
+        # Save and update
+        self.save_edited_masks()
+        self.redraw_with_highlight()
+
+        logger.info(f"Applied polygon ({len(scaled_points)} points) to Person {self.highlighted_person + 1} - {'added' if add_to_mask else 'erased'}")
 
     def set_brush_mode(self, mode: str):
         """Set brush mode to 'paint' or 'erase'."""
@@ -862,17 +1911,32 @@ class DetectionPreviewDialog(QDialog):
 
     def paint_mask_at(self, x: int, y: int, brush_size: int):
         """Paint or erase mask at the given image coordinates."""
-        if self.highlighted_person is None:
-            return
+        # Scale coordinates from display space to full-resolution space
+        # The displayed image may be scaled down for performance
+        if self.current_display_scale != 1.0:
+            x = int(x / self.current_display_scale)
+            y = int(y / self.current_display_scale)
+            brush_size = max(1, int(brush_size / self.current_display_scale))
+            logger.debug(f"Scaled paint coords: ({x}, {y}), brush={brush_size} (scale={self.current_display_scale:.3f})")
 
-        if not (0 <= self.highlighted_person < len(self.current_detections)):
-            return
+        # Handle adding new person mode
+        if self.adding_person_mode:
+            mask = self.new_person_mask
+            if mask is None:
+                return
+        else:
+            # Handle editing existing person
+            if self.highlighted_person is None:
+                return
 
-        detection = self.current_detections[self.highlighted_person]
-        mask = detection.get('mask')
+            if not (0 <= self.highlighted_person < len(self.current_detections)):
+                return
 
-        if mask is None:
-            return
+            detection = self.current_detections[self.highlighted_person]
+            mask = detection.get('mask')
+
+            if mask is None:
+                return
 
         # Get brush radius
         radius = brush_size // 2
@@ -909,19 +1973,35 @@ class DetectionPreviewDialog(QDialog):
         else:  # erase
             mask[y_min:y_max, x_min:x_max] &= ~circle_mask_crop
 
-        # Update the detection's mask
-        detection['mask'] = mask
+        # Update the mask
+        if self.adding_person_mode:
+            self.new_person_mask = mask
+        else:
+            detection['mask'] = mask
 
-        # Save edited masks to disk
-        self.save_edited_masks()
+        # Mark that we need to save (but don't save yet - wait for mouse release)
+        self.pending_mask_save = True
 
-        # Re-draw to show changes
-        self.redraw_with_highlight()
+        # Schedule a redraw (debounced to avoid too many redraws)
+        self.schedule_redraw()
+
+    def clear_thumbnail_cache_for_person(self, person_index: int):
+        """Clear cached thumbnail for a specific person."""
+        if person_index < len(self.current_detections):
+            bbox = self.current_detections[person_index]['bbox']
+            cache_key = (person_index, tuple(bbox))
+            if cache_key in self.thumbnail_cache:
+                del self.thumbnail_cache[cache_key]
+                logger.debug(f"Cleared thumbnail cache for person {person_index + 1}")
 
     def save_edited_masks(self):
-        """Save edited masks to a sidecar .masks.npz file."""
+        """Save edited masks, enabled states, and aliases to a sidecar .masks.npz file."""
         if not self.image_path or not self.current_detections:
             return
+
+        # Clear thumbnail cache for the currently edited person (if in edit mode)
+        if self.selected_card_index is not None:
+            self.clear_thumbnail_cache_for_person(self.selected_card_index)
 
         # Create sidecar file path
         mask_file_path = Path(self.image_path).with_suffix(Path(self.image_path).suffix + '.masks.npz')
@@ -935,15 +2015,22 @@ class DetectionPreviewDialog(QDialog):
                 mask_data[f'person_{i}_mask'] = mask
                 mask_data[f'person_{i}_bbox'] = np.array(detection['bbox'])
 
+            # Store enabled state (as int: 1 = True, 0 = False)
+            mask_data[f'person_{i}_enabled'] = np.array([1 if detection.get('enabled', True) else 0])
+
+            # Store alias (encode as bytes for numpy)
+            alias = detection.get('alias', '')
+            mask_data[f'person_{i}_alias'] = np.array([alias], dtype=object)
+
         # Save to compressed numpy format
         try:
             np.savez_compressed(mask_file_path, **mask_data)
-            logger.info(f"Saved edited masks to {mask_file_path}")
+            logger.debug(f"Saved detection data to {mask_file_path}")
         except Exception as e:
-            logger.error(f"Failed to save edited masks: {e}")
+            logger.error(f"Failed to save detection data: {e}")
 
     def load_edited_masks(self):
-        """Load edited masks from sidecar .masks.npz file if it exists."""
+        """Load edited masks, enabled states, and aliases from sidecar .masks.npz file if it exists."""
         if not self.image_path or not self.current_detections:
             return False
 
@@ -955,12 +2042,14 @@ class DetectionPreviewDialog(QDialog):
 
         try:
             # Load mask data
-            mask_data = np.load(mask_file_path)
+            mask_data = np.load(mask_file_path, allow_pickle=True)  # allow_pickle for alias strings
 
-            # Apply masks to detections by matching bboxes
+            # Apply masks, enabled states, and aliases to detections by matching bboxes
             for i, detection in enumerate(self.current_detections):
                 person_key = f'person_{i}_mask'
                 bbox_key = f'person_{i}_bbox'
+                enabled_key = f'person_{i}_enabled'
+                alias_key = f'person_{i}_alias'
 
                 if person_key in mask_data and bbox_key in mask_data:
                     # Verify bbox matches (detections should be consistent)
@@ -974,12 +2063,462 @@ class DetectionPreviewDialog(QDialog):
                     else:
                         logger.warning(f"Bbox mismatch for person {i+1}, skipping edited mask")
 
-            logger.info(f"Loaded edited masks from {mask_file_path}")
+                # Load enabled state if present
+                if enabled_key in mask_data:
+                    enabled_value = mask_data[enabled_key][0]
+                    detection['enabled'] = bool(enabled_value)
+                    logger.debug(f"Loaded enabled state for person {i+1}: {detection['enabled']}")
+
+                # Load alias if present
+                if alias_key in mask_data:
+                    alias_value = mask_data[alias_key][0]
+                    detection['alias'] = str(alias_value) if alias_value else ''
+                    logger.debug(f"Loaded alias for person {i+1}: '{detection['alias']}'")
+
+            logger.info(f"Loaded detection data from {mask_file_path}")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to load edited masks: {e}")
+            logger.error(f"Failed to load detection data: {e}")
             return False
+
+    def add_manual_person(self):
+        """Enter mode to manually add a person by painting."""
+        if not self.current_image:
+            return
+
+        # Cancel any other active modes
+        if self.polygon_select_mode:
+            self.cancel_polygon_select()
+        if self.split_line_mode:
+            self.cancel_split_by_line()
+
+        # Create empty mask for new person
+        if self.current_image.height and self.current_image.width:
+            self.new_person_mask = np.zeros((self.current_image.height, self.current_image.width), dtype=bool)
+        else:
+            QMessageBox.warning(
+                self,
+                "Error",
+                "Cannot determine image dimensions."
+            )
+            return
+
+        # Enter adding person mode
+        self.adding_person_mode = True
+
+        # Auto-enable edit mode
+        if not self.edit_mode_enabled:
+            self.edit_mode_checkbox.setChecked(True)
+            self.toggle_edit_mode()
+
+        # Set to paint mode
+        self.paint_radio.setChecked(True)
+        self.brush_mode = 'paint'
+
+        # Update UI with immediate visual feedback
+        self.selected_person_label.setText("🟢 ADD PERSON MODE - Paint the new person, then click 'Finish Adding'")
+        self.selected_person_label.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px; font-weight: bold;")
+        self.selected_person_label.show()
+        self.add_person_button.setText("Finish Adding")
+        self.add_person_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        try:
+            self.add_person_button.clicked.disconnect()
+        except:
+            pass
+        self.add_person_button.clicked.connect(self.finish_adding_person)
+
+        logger.info("Entered manual person addition mode")
+
+    def finish_adding_person(self):
+        """Finish adding a manually painted person."""
+        if not self.adding_person_mode or self.new_person_mask is None:
+            return
+
+        # Check if mask has any pixels
+        if not self.new_person_mask.any():
+            QMessageBox.warning(
+                self,
+                "Empty Mask",
+                "Please paint some pixels for the new person before finishing."
+            )
+            return
+
+        # Calculate bounding box from mask
+        mask_coords = np.argwhere(self.new_person_mask)
+        if len(mask_coords) == 0:
+            QMessageBox.warning(
+                self,
+                "Empty Mask",
+                "The painted mask is empty."
+            )
+            return
+
+        y_coords = mask_coords[:, 0]
+        x_coords = mask_coords[:, 1]
+
+        x1 = int(x_coords.min())
+        y1 = int(y_coords.min())
+        x2 = int(x_coords.max())
+        y2 = int(y_coords.max())
+
+        bbox = [x1, y1, x2, y2]
+        width = x2 - x1
+        height = y2 - y1
+        area = width * height
+        center_y = (y1 + y2) // 2
+
+        # Create new detection
+        new_detection = {
+            'bbox': bbox,
+            'confidence': 1.0,  # Manual additions have 100% confidence
+            'area': area,
+            'center_y': center_y,
+            'mask': self.new_person_mask,
+            'enabled': True,
+            'alias': ''
+        }
+
+        # Add to detections
+        self.current_detections.append(new_detection)
+
+        # Exit adding person mode
+        self.adding_person_mode = False
+        self.new_person_mask = None
+
+        # Update UI
+        self.add_person_button.setText("Add Person")
+        self.add_person_button.setStyleSheet("")  # Reset style
+        try:
+            self.add_person_button.clicked.disconnect()
+        except:
+            pass
+        self.add_person_button.clicked.connect(self.add_manual_person)
+        self.selected_person_label.setStyleSheet("")  # Reset style
+
+        # Update cards
+        self.update_crop_cards(self.current_detections)
+
+        # Save to disk
+        self.save_edited_masks()
+
+        # Redraw
+        self.redraw_with_highlight()
+
+        logger.info(f"Added manual person (bbox: {bbox})")
+        QMessageBox.information(
+            self,
+            "Person Added",
+            f"New person added successfully! Total people: {len(self.current_detections)}"
+        )
+
+    def start_split_by_line(self):
+        """Start split by line mode."""
+        if not self.current_image:
+            return
+
+        # Cancel any other active modes
+        if self.polygon_select_mode:
+            self.cancel_polygon_select()
+
+        # Disable edit mode if active
+        if self.edit_mode_checkbox.isChecked():
+            self.edit_mode_checkbox.setChecked(False)
+            self.toggle_edit_mode()
+
+        self.split_line_mode = True
+        self.split_line_points = []
+
+        # Update UI with immediate visual feedback
+        self.selected_person_label.setText("🟦 SPLIT BY LINE MODE - Click points to draw a line, then 'Finish Line'")
+        self.selected_person_label.setStyleSheet("background-color: #2196F3; color: white; padding: 5px; font-weight: bold;")
+        self.selected_person_label.show()
+        self.split_by_line_button.setText("Cancel Split")
+        self.split_by_line_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
+        try:
+            self.split_by_line_button.clicked.disconnect()
+        except:
+            pass
+        self.split_by_line_button.clicked.connect(self.cancel_split_by_line)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        logger.info("Entered split by line mode")
+
+    def cancel_split_by_line(self):
+        """Cancel split by line mode."""
+        self.split_line_mode = False
+        self.split_line_points = []
+
+        # Update UI
+        self.split_by_line_button.setText("Split by Line")
+        self.split_by_line_button.setStyleSheet("")  # Reset style
+        try:
+            self.split_by_line_button.clicked.disconnect()
+        except:
+            pass
+        self.split_by_line_button.clicked.connect(self.start_split_by_line)
+        self.selected_person_label.hide()
+        self.selected_person_label.setStyleSheet("")  # Reset style
+        self.finish_line_button.setVisible(False)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        # Redraw to remove line
+        self.redraw_with_highlight()
+
+        logger.info("Cancelled split by line mode")
+
+    def add_split_line_point(self, x: float, y: float):
+        """Add a point to the split line, clamping to image bounds."""
+        # Clamp coordinates to displayed image bounds
+        # Get scene rect which represents the displayed image dimensions
+        scene_rect = self.graphics_scene.sceneRect()
+        clamped_x = max(0, min(x, scene_rect.width() - 1))
+        clamped_y = max(0, min(y, scene_rect.height() - 1))
+
+        self.split_line_points.append((int(clamped_x), int(clamped_y)))
+
+        if (clamped_x != x or clamped_y != y):
+            logger.debug(f"Clamped split line point from ({x:.0f}, {y:.0f}) to ({clamped_x:.0f}, {clamped_y:.0f})")
+
+        # Update UI
+        num_points = len(self.split_line_points)
+        if num_points == 1:
+            self.selected_person_label.setText("Click more points, then 'Finish Line'")
+        else:
+            self.selected_person_label.setText(f"{num_points} points - Click more or 'Finish Line'")
+
+        # Show finish button after 2+ points
+        if num_points >= 2:
+            self.finish_line_button.setVisible(True)
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        # Redraw to show the line
+        self.redraw_with_highlight()
+
+    def finish_split_line(self):
+        """Finish the line and create two crops, one for each side."""
+        if len(self.split_line_points) < 2:
+            return
+
+        import cv2
+        height, width = self.current_image.height, self.current_image.width
+
+        # Scale split line points from display space to full-resolution space
+        scaled_points = []
+        for x, y in self.split_line_points:
+            if self.current_display_scale != 1.0:
+                x = int(x / self.current_display_scale)
+                y = int(y / self.current_display_scale)
+            scaled_points.append((x, y))
+
+        logger.debug(f"Scaled {len(self.split_line_points)} split line points (scale factor: {self.current_display_scale:.3f})")
+
+        # Use first and last point to define the line
+        p1 = np.array(scaled_points[0], dtype=float)
+        p2 = np.array(scaled_points[-1], dtype=float)
+
+        # Calculate line direction
+        direction = p2 - p1
+        if np.linalg.norm(direction) < 1:
+            QMessageBox.warning(self, "Invalid Line", "Line is too short.")
+            return
+
+        logger.info(f"Split line: p1={p1}, p2={p2}")
+
+        # Create masks using cross product to determine which side of line each pixel is on
+        # For a line from p1 to p2, and a point p:
+        # cross = (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x)
+        # cross > 0: left side, cross < 0: right side
+
+        # Create coordinate grids
+        y_coords, x_coords = np.mgrid[0:height, 0:width]
+
+        # Calculate cross product for all pixels
+        cross = (p2[0] - p1[0]) * (y_coords - p1[1]) - (p2[1] - p1[1]) * (x_coords - p1[0])
+
+        # Create masks
+        left_mask = cross > 0
+        right_mask = cross < 0
+
+        logger.info(f"Split masks created: left={left_mask.sum()} pixels, right={right_mask.sum()} pixels")
+
+        # Helper function to create detection from mask
+        def mask_to_detection(mask: np.ndarray) -> dict:
+            """Convert boolean mask to detection dictionary."""
+            if not mask.any():
+                return None
+
+            # Calculate bbox
+            mask_coords = np.argwhere(mask)
+            y_coords = mask_coords[:, 0]
+            x_coords = mask_coords[:, 1]
+
+            x1, y1 = int(x_coords.min()), int(y_coords.min())
+            x2, y2 = int(x_coords.max()), int(y_coords.max())
+
+            return {
+                'bbox': [x1, y1, x2, y2],
+                'confidence': 1.0,
+                'area': (x2 - x1) * (y2 - y1),
+                'center_y': (y1 + y2) // 2,
+                'mask': mask,
+                'enabled': True,
+                'alias': ''
+            }
+
+        # Create detections for both sides
+        new_detections = []
+        left_detection = mask_to_detection(left_mask)
+        if left_detection:
+            new_detections.append(left_detection)
+
+        right_detection = mask_to_detection(right_mask)
+        if right_detection:
+            new_detections.append(right_detection)
+
+        if not new_detections:
+            QMessageBox.warning(self, "Empty Masks", "Failed to create crops from the split line.")
+            return
+
+        # Add to detections
+        self.current_detections.extend(new_detections)
+
+        # Exit split line mode
+        self.cancel_split_by_line()
+
+        # Update UI
+        self.update_crop_cards(self.current_detections)
+        self.save_edited_masks()
+        self.redraw_with_highlight()
+
+        logger.info(f"Created {len(new_detections)} people from split line ({len(self.split_line_points)} points)")
+        QMessageBox.information(self, "People Added", f"{len(new_detections)} new people created from split line!")
+
+    def complete_split_by_line(self):
+        """Complete the split by line operation."""
+        if len(self.split_line_points) != 2:
+            return
+
+        p1, p2 = self.split_line_points
+        x1, y1 = p1
+        x2, y2 = p2
+
+        # Determine if line is more vertical or horizontal
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+
+        if dx > dy:
+            # More horizontal - split left/right
+            options = ["Left side", "Right side"]
+            question = "Which side should be the new person?"
+        else:
+            # More vertical - split top/bottom
+            options = ["Top side", "Bottom side"]
+            question = "Which side should be the new person?"
+
+        # Ask user which side
+        from PySide6.QtWidgets import QInputDialog
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Select Side",
+            question,
+            options,
+            0,
+            False
+        )
+
+        if not ok:
+            self.cancel_split_by_line()
+            return
+
+        # Create mask for the selected side
+        height, width = self.current_image.height, self.current_image.width
+        new_mask = np.zeros((height, width), dtype=bool)
+
+        # Create mask based on which side of the line
+        for y in range(height):
+            for x in range(width):
+                # Calculate which side of the line this pixel is on
+                # Using cross product: (p2 - p1) x (point - p1)
+                cross = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
+
+                if dx > dy:
+                    # Horizontal line
+                    if choice == "Left side":
+                        new_mask[y, x] = cross > 0
+                    else:  # Right side
+                        new_mask[y, x] = cross < 0
+                else:
+                    # Vertical line
+                    if choice == "Top side":
+                        new_mask[y, x] = cross > 0
+                    else:  # Bottom side
+                        new_mask[y, x] = cross < 0
+
+        # Check if mask has any pixels
+        if not new_mask.any():
+            QMessageBox.warning(
+                self,
+                "Empty Mask",
+                "The selected side has no pixels."
+            )
+            self.cancel_split_by_line()
+            return
+
+        # Calculate bounding box from mask
+        mask_coords = np.argwhere(new_mask)
+        y_coords = mask_coords[:, 0]
+        x_coords = mask_coords[:, 1]
+
+        bbox_x1 = int(x_coords.min())
+        bbox_y1 = int(y_coords.min())
+        bbox_x2 = int(x_coords.max())
+        bbox_y2 = int(y_coords.max())
+
+        bbox = [bbox_x1, bbox_y1, bbox_x2, bbox_y2]
+        bbox_width = bbox_x2 - bbox_x1
+        bbox_height = bbox_y2 - bbox_y1
+        area = bbox_width * bbox_height
+        center_y = (bbox_y1 + bbox_y2) // 2
+
+        # Create new detection
+        new_detection = {
+            'bbox': bbox,
+            'confidence': 1.0,
+            'area': area,
+            'center_y': center_y,
+            'mask': new_mask,
+            'enabled': True,
+            'alias': ''
+        }
+
+        # Add to detections
+        self.current_detections.append(new_detection)
+
+        # Exit split line mode
+        self.cancel_split_by_line()
+
+        # Update table
+        self.update_detection_table(self.current_detections)
+
+        # Save to disk
+        self.save_edited_masks()
+
+        # Redraw
+        self.redraw_with_highlight()
+
+        logger.info(f"Split image by line, created new person (bbox: {bbox})")
+        QMessageBox.information(
+            self,
+            "Person Added",
+            f"New person created from {choice.lower()}! Total people: {len(self.current_detections)}"
+        )
 
     def delete_edited_masks(self):
         """Delete the sidecar .masks.npz file."""
@@ -1011,8 +2550,310 @@ class DetectionPreviewDialog(QDialog):
                 "No edited masks file found for this image."
             )
 
+    def update_crop_cards(self, detections: list, from_cache: bool = False):
+        """Update the crop card gallery.
+
+        Args:
+            detections: List of detection dictionaries
+            from_cache: If True, preserve thumbnail cache. If False, clear it.
+        """
+        # Clear existing cards
+        for card in self.person_cards:
+            card.deleteLater()
+        self.person_cards.clear()
+
+        # Only clear thumbnail cache if running fresh detection
+        # When loading from cache, preserve thumbnails for faster display
+        if not from_cache:
+            logger.debug("Clearing thumbnail cache (fresh detection)")
+            self.thumbnail_cache.clear()
+        else:
+            logger.debug("Preserving thumbnail cache (loaded from cache)")
+
+        # Initialize detection properties
+        for detection in detections:
+            if 'enabled' not in detection:
+                detection['enabled'] = True
+            if 'alias' not in detection:
+                detection['alias'] = ''
+
+        # Generate crop thumbnails and create cards
+        for i, detection in enumerate(detections):
+            card = self._create_crop_card(i, detection)
+            self.person_cards.append(card)
+            self.cards_layout.addWidget(card)
+
+        # Update status footer
+        self.update_status_footer()
+
+        # Deselect any previously selected card
+        self.selected_card_index = None
+        self.update_properties_panel()
+
+    def _create_crop_card(self, index: int, detection: dict) -> QWidget:
+        """Create a crop card widget for a person."""
+        card = QFrame()
+        card.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
+        card.setLineWidth(2)
+        card.setFixedSize(200, 250)
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Store index for click handling
+        card.person_index = index
+
+        # Card layout
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(5, 5, 5, 5)
+
+        # Thumbnail
+        thumbnail_label = QLabel()
+        thumbnail_label.setFixedSize(190, 190)
+        thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        thumbnail_label.setStyleSheet("border: 1px solid #ccc;")
+
+        # Generate thumbnail (with caching)
+        try:
+            crop_pixmap = self._generate_crop_thumbnail(detection, index=index)
+            thumbnail_label.setPixmap(crop_pixmap.scaled(
+                190, 190,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        except Exception as e:
+            logger.error(f"Failed to generate thumbnail for person {index + 1}: {e}")
+            thumbnail_label.setText("Error")
+
+        card_layout.addWidget(thumbnail_label)
+
+        # Info overlay
+        info_label = QLabel()
+        alias = detection.get('alias', '')
+        label_text = alias if alias else f"Person {index + 1}"
+        enabled = detection.get('enabled', True)
+
+        if not enabled:
+            info_label.setText(f"{label_text}\n🚫 Disabled")
+            info_label.setStyleSheet("color: #f44336; font-weight: bold;")
+            card.setStyleSheet("QFrame { opacity: 0.5; }")
+        else:
+            info_label.setText(label_text)
+            info_label.setStyleSheet("font-weight: bold;")
+
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(info_label)
+
+        # Click handler
+        def on_card_clicked(event):
+            self.select_card(index)
+
+        card.mousePressEvent = on_card_clicked
+
+        return card
+
+    def _generate_crop_thumbnail(self, detection: dict, index: int = None) -> QPixmap:
+        """Generate a crop thumbnail for a detection (with caching)."""
+        import time
+        start_time = time.time()
+
+        if not self.current_image:
+            return QPixmap()
+
+        # Check cache first (keyed by index and bbox)
+        bbox = detection['bbox']
+        if index is not None:
+            cache_key = (index, tuple(bbox))
+            if cache_key in self.thumbnail_cache:
+                logger.debug(f"⏱️  Person {index+1}: thumbnail from cache (0.000s)")
+                return self.thumbnail_cache[cache_key]
+
+        # Use segmentation-based extraction
+        mask = detection.get('mask')
+
+        if mask is not None:
+            # Extract segmented person
+            from auto_captioning.models.multi_person_tagger import MultiPersonTagger
+            # Create a temporary tagger instance for the extraction method
+            temp_settings = {
+                'mask_overlapping_people': False,
+                'masking_method': 'Segmentation',
+                'preserve_target_bbox': False,
+                'crop_padding': 10,
+                'mask_erosion_size': 0,
+                'mask_dilation_size': 0,
+                'mask_blur_size': 0
+            }
+
+            # Create temporary instance (we just need the extraction method)
+            img_array = np.array(self.current_image)
+            num_channels = img_array.shape[2] if len(img_array.shape) == 3 else 1
+            white_value = [255] * num_channels if num_channels > 1 else 255
+            result_array = np.full_like(img_array, white_value)
+            result_array[mask] = img_array[mask]
+            result_image = PilImage.fromarray(result_array)
+
+            # Find tight bounds and crop
+            mask_coords = np.argwhere(mask)
+            if len(mask_coords) > 0:
+                y_coords = mask_coords[:, 0]
+                x_coords = mask_coords[:, 1]
+                y_min, y_max = y_coords.min(), y_coords.max()
+                x_min, x_max = x_coords.min(), x_coords.max()
+
+                padding = 10
+                crop_x1 = max(0, x_min - padding)
+                crop_y1 = max(0, y_min - padding)
+                crop_x2 = min(self.current_image.width, x_max + padding + 1)
+                crop_y2 = min(self.current_image.height, y_max + padding + 1)
+
+                cropped = result_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+            else:
+                # Fallback to bbox
+                x1, y1, x2, y2 = bbox
+                cropped = self.current_image.crop((x1, y1, x2, y2))
+        else:
+            # Use bbox
+            x1, y1, x2, y2 = bbox
+            cropped = self.current_image.crop((x1, y1, x2, y2))
+
+        # Convert to QPixmap
+        buffer = BytesIO()
+        cropped.save(buffer, format='PNG')
+        buffer.seek(0)
+        qimage = QImage.fromData(buffer.getvalue())
+        pixmap = QPixmap.fromImage(qimage)
+
+        # Store in cache
+        if index is not None:
+            cache_key = (index, tuple(bbox))
+            self.thumbnail_cache[cache_key] = pixmap
+
+        elapsed = time.time() - start_time
+        logger.info(f"⏱️  Person {index+1 if index is not None else '?'}: generated thumbnail in {elapsed:.3f}s (mask={'yes' if mask is not None else 'no'})")
+
+        return pixmap
+
+    def select_card(self, index: int):
+        """Select a crop card."""
+        if index == self.selected_card_index:
+            return  # Already selected
+
+        # Update selection
+        self.selected_card_index = index
+
+        # Update card styles
+        for i, card in enumerate(self.person_cards):
+            if i == index:
+                card.setStyleSheet("QFrame { border: 3px solid #2196F3; }")
+            else:
+                card.setStyleSheet("")
+
+        # Update properties panel
+        self.update_properties_panel()
+
+        # Update mode banner
+        self.update_mode_banner()
+
+        # Highlight in image
+        self.highlighted_person = index
+        self.redraw_with_highlight()
+
+    def update_properties_panel(self):
+        """Update the properties panel based on selected card."""
+        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
+            self.alias_input.setEnabled(False)
+            self.enabled_checkbox_panel.setEnabled(False)
+            self.inverse_button.setEnabled(False)
+            self.delete_person_button.setEnabled(False)
+            self.alias_input.clear()
+            return
+
+        detection = self.current_detections[self.selected_card_index]
+
+        self.alias_input.setEnabled(True)
+        self.enabled_checkbox_panel.setEnabled(True)
+        self.inverse_button.setEnabled(True)
+        self.delete_person_button.setEnabled(True)
+
+        # Block signals to avoid recursive updates
+        self.alias_input.blockSignals(True)
+        self.enabled_checkbox_panel.blockSignals(True)
+
+        self.alias_input.setText(detection.get('alias', ''))
+        self.enabled_checkbox_panel.setChecked(detection.get('enabled', True))
+
+        self.alias_input.blockSignals(False)
+        self.enabled_checkbox_panel.blockSignals(False)
+
+    def update_status_footer(self):
+        """Update the status footer with counts."""
+        if not self.current_detections:
+            self.status_footer.setText("")
+            return
+
+        total = len(self.current_detections)
+        enabled = sum(1 for d in self.current_detections if d.get('enabled', True))
+        disabled = total - enabled
+
+        if disabled > 0:
+            self.status_footer.setText(f"📊 {enabled} enabled, {disabled} disabled ({total} total)")
+        else:
+            self.status_footer.setText(f"📊 {total} {'person' if total == 1 else 'people'} - all enabled")
+
+    def update_mode_banner(self):
+        """Update the mode banner based on current state."""
+        if self.polygon_select_mode:
+            points_count = len(self.polygon_points)
+            if points_count == 0:
+                text = "🟣 Polygon Select Mode - Click to add points (min 3)"
+            elif points_count < 3:
+                text = f"🟣 Polygon Select Mode - {points_count} points. Need {3 - points_count} more"
+            else:
+                text = f"🟣 Polygon Select Mode - {points_count} points. Click more or 'Finish Polygon'"
+            style = "background-color: #9C27B0;"  # Purple
+        elif self.split_line_mode:
+            points_count = len(self.split_line_points)
+            if points_count == 0:
+                text = "🟡 Split Line Mode - Click to add points"
+            elif points_count == 1:
+                text = "🟡 Split Line Mode - Click more points, then 'Finish Line'"
+            else:
+                text = f"🟡 Split Line Mode - {points_count} points. Click more or 'Finish Line'"
+            style = "background-color: #FFC107;"  # Yellow
+        elif self.adding_person_mode:
+            text = "🟠 Add Person Mode - Paint to create mask, then 'Finish Adding'"
+            style = "background-color: #FF9800;"  # Orange
+        elif self.edit_mode_enabled and self.selected_card_index is not None:
+            alias = self.current_detections[self.selected_card_index].get('alias', '')
+            label = alias if alias else f"Person {self.selected_card_index + 1}"
+            text = f"🔵 Edit Mode: {label} - Paint or erase mask"
+            style = "background-color: #2196F3;"  # Blue
+        elif self.selected_card_index is not None:
+            alias = self.current_detections[self.selected_card_index].get('alias', '')
+            label = alias if alias else f"Person {self.selected_card_index + 1}"
+            text = f"📝 Selected: {label} - Edit properties below or enable Edit Mode"
+            style = "background-color: #4CAF50;"  # Green
+        else:
+            text = "🟢 Normal Mode - Select a person card below to edit"
+            style = "background-color: #4CAF50;"  # Green
+
+        self.mode_banner.setText(text)
+        self.mode_banner.setStyleSheet(f"""
+            QLabel {{
+                {style}
+                color: white;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 14px;
+                border-radius: 5px;
+            }}
+        """)
+
+    # Keep old method name for backwards compatibility during refactor
     def update_detection_table(self, detections: list):
         """Update the detection info table."""
+        # Block signals while updating to avoid triggering itemChanged
+        self.detection_table.blockSignals(True)
+
         self.detection_table.setRowCount(len(detections))
 
         for i, detection in enumerate(detections):
@@ -1022,23 +2863,73 @@ class DetectionPreviewDialog(QDialog):
             height = y2 - y1
             confidence = detection['confidence']
 
-            # Person number
+            # Initialize enabled state if not present (default to True)
+            if 'enabled' not in detection:
+                detection['enabled'] = True
+
+            # Initialize alias if not present (default to empty)
+            if 'alias' not in detection:
+                detection['alias'] = ''
+
+            # Column 0: Person number
             self.detection_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
 
-            # Confidence
-            self.detection_table.setItem(
-                i, 1, QTableWidgetItem(f"{confidence:.3f}")
+            # Column 1: Enabled checkbox
+            checkbox = QCheckBox()
+            checkbox.setChecked(detection['enabled'])
+            checkbox.setStyleSheet("margin-left: 50%; margin-right: 50%;")
+            checkbox_container = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_container)
+            checkbox_layout.addWidget(checkbox)
+            checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            self.detection_table.setCellWidget(i, 1, checkbox_container)
+            # Connect checkbox to update detection state
+            checkbox.stateChanged.connect(
+                lambda state, idx=i: self.on_person_enabled_changed(idx, state == Qt.CheckState.Checked.value)
             )
 
-            # Size
-            self.detection_table.setItem(
-                i, 2, QTableWidgetItem(f"{width}x{height}")
-            )
+            # Column 2: Alias (editable)
+            alias_item = QTableWidgetItem(detection['alias'])
+            alias_item.setFlags(alias_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.detection_table.setItem(i, 2, alias_item)
 
-            # Bbox coordinates
-            self.detection_table.setItem(
-                i, 3, QTableWidgetItem(f"({x1},{y1},{x2},{y2})")
-            )
+            # Column 3: Confidence
+            confidence_item = QTableWidgetItem(f"{confidence:.3f}")
+            confidence_item.setFlags(confidence_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.detection_table.setItem(i, 3, confidence_item)
+
+            # Column 4: Size
+            size_item = QTableWidgetItem(f"{width}x{height}")
+            size_item.setFlags(size_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.detection_table.setItem(i, 4, size_item)
+
+            # Column 5: Bbox coordinates
+            bbox_item = QTableWidgetItem(f"({x1},{y1},{x2},{y2})")
+            bbox_item.setFlags(bbox_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.detection_table.setItem(i, 5, bbox_item)
+
+        # Re-enable signals
+        self.detection_table.blockSignals(False)
+
+    def on_person_enabled_changed(self, person_idx: int, enabled: bool):
+        """Handle person enabled/disabled state change."""
+        if 0 <= person_idx < len(self.current_detections):
+            self.current_detections[person_idx]['enabled'] = enabled
+            # Save to sidecar file
+            self.save_edited_masks()
+            logger.info(f"Person {person_idx + 1} {'enabled' if enabled else 'disabled'}")
+
+    def on_detection_table_changed(self, item: QTableWidgetItem):
+        """Handle changes to table items (e.g., alias editing)."""
+        if item.column() == 2:  # Alias column
+            row = item.row()
+            if 0 <= row < len(self.current_detections):
+                new_alias = item.text().strip()
+                self.current_detections[row]['alias'] = new_alias
+                # Save to sidecar file
+                self.save_edited_masks()
+                logger.info(f"Person {row + 1} alias set to: '{new_alias}'")
 
     def show_crop_previews(self):
         """Generate and display crop previews showing what WD Tagger will see."""
@@ -1071,8 +2962,12 @@ class DetectionPreviewDialog(QDialog):
             mask_dilation = self.detection_settings.get('mask_dilation_size', 0)
             mask_blur = self.detection_settings.get('mask_blur_size', 0)
 
-            # Generate crops for each person
+            # Generate crops for each person (skip disabled ones)
             for i, detection in enumerate(self.current_detections):
+                # Skip if person is disabled
+                if not detection.get('enabled', True):
+                    continue
+
                 # Extract person using segmentation or bbox+masking
                 if masking_method == 'Segmentation' and detection.get('mask') is not None:
                     # Extract ONLY the segmented person on white background

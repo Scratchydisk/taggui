@@ -17,6 +17,11 @@ def suppress_warnings():
     environment = os.getenv('TAGGUI_ENVIRONMENT')
     if environment == 'development':
         print('Running in development environment.')
+        # Configure logging for development - show INFO messages
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(levelname)s:%(name)s:%(message)s'
+        )
         return
     logging.basicConfig(level=logging.ERROR)
     warnings.simplefilter('ignore')

@@ -28,7 +28,7 @@ class MultiPersonTagger(AutoCaptioningModel):
     Multi-person tagger using YOLOv8 detection and WD Tagger.
 
     Detects people, tags each individually, extracts scene tags, and formats
-    output as: person1: tags, person2: tags, scene: tags
+    output as: person1, tags, person2, tags, scene, tags
     """
 
     image_mode = 'RGBA'  # Same as WD Tagger
@@ -296,6 +296,145 @@ class MultiPersonTagger(AutoCaptioningModel):
         """
         pil_image = self.load_image(image)
         return pil_image
+
+    def _load_edited_masks(self, image_path, detections: list) -> bool:
+        """
+        Load edited masks, enabled states, and aliases from sidecar .masks.npz file if it exists.
+
+        Args:
+            image_path: Path to the image file
+            detections: List of detection dictionaries to update with edited data
+
+        Returns:
+            True if data was loaded, False otherwise
+        """
+        from pathlib import Path
+
+        # Check for sidecar file
+        mask_file_path = Path(image_path).with_suffix(Path(image_path).suffix + '.masks.npz')
+
+        if not mask_file_path.exists():
+            return False
+
+        try:
+            # Load mask data (allow_pickle for alias strings)
+            mask_data = np.load(mask_file_path, allow_pickle=True)
+
+            # Determine how many people are saved (look for person_N_bbox keys)
+            saved_person_count = 0
+            for key in mask_data.keys():
+                if key.startswith('person_') and key.endswith('_bbox'):
+                    # Extract person index
+                    person_num = int(key.split('_')[1])
+                    saved_person_count = max(saved_person_count, person_num + 1)
+
+            logger.debug(f"Found {saved_person_count} saved people, currently have {len(detections)} detections")
+
+            # Apply masks, enabled states, and aliases to existing detections
+            data_loaded = 0
+            for i, detection in enumerate(detections):
+                person_key = f'person_{i}_mask'
+                bbox_key = f'person_{i}_bbox'
+                enabled_key = f'person_{i}_enabled'
+                alias_key = f'person_{i}_alias'
+
+                # Load mask if present
+                if person_key in mask_data and bbox_key in mask_data:
+                    # Verify bbox matches (detections should be consistent)
+                    saved_bbox = mask_data[bbox_key]
+                    current_bbox = np.array(detection['bbox'])
+
+                    # Allow small differences due to detection variance
+                    if np.allclose(saved_bbox, current_bbox, atol=10):
+                        detection['mask'] = mask_data[person_key]
+                        data_loaded += 1
+                        logger.debug(f"Loaded edited mask for person {i+1}")
+                    else:
+                        logger.warning(
+                            f"Bbox mismatch for person {i+1}, skipping edited mask. "
+                            f"Saved: {saved_bbox}, Current: {current_bbox}"
+                        )
+
+                # Load enabled state if present
+                if enabled_key in mask_data:
+                    enabled_value = mask_data[enabled_key][0]
+                    detection['enabled'] = bool(enabled_value)
+                    logger.debug(f"Loaded enabled state for person {i+1}: {detection['enabled']}")
+
+                # Load alias if present
+                if alias_key in mask_data:
+                    alias_value = mask_data[alias_key][0]
+                    detection['alias'] = str(alias_value) if alias_value else ''
+                    logger.debug(f"Loaded alias for person {i+1}: '{detection['alias']}'")
+
+            # Load any additional manually-added people (inverse crops, split by line, etc.)
+            if saved_person_count > len(detections):
+                logger.info(
+                    f"Found {saved_person_count - len(detections)} manually-added people, "
+                    f"loading them..."
+                )
+                for i in range(len(detections), saved_person_count):
+                    person_key = f'person_{i}_mask'
+                    bbox_key = f'person_{i}_bbox'
+                    enabled_key = f'person_{i}_enabled'
+                    alias_key = f'person_{i}_alias'
+
+                    # Check if this person has required data
+                    if person_key not in mask_data or bbox_key not in mask_data:
+                        logger.warning(f"Skipping person {i+1}: missing mask or bbox data")
+                        continue
+
+                    # Reconstruct detection from saved data
+                    saved_bbox = mask_data[bbox_key]
+                    saved_mask = mask_data[person_key]
+
+                    # Calculate detection properties from bbox
+                    x1, y1, x2, y2 = saved_bbox
+                    bbox_width = x2 - x1
+                    bbox_height = y2 - y1
+                    area = bbox_width * bbox_height
+                    center_y = (y1 + y2) // 2
+
+                    # Load enabled state (default True)
+                    enabled = True
+                    if enabled_key in mask_data:
+                        enabled_value = mask_data[enabled_key][0]
+                        enabled = bool(enabled_value)
+
+                    # Load alias (default empty)
+                    alias = ''
+                    if alias_key in mask_data:
+                        alias_value = mask_data[alias_key][0]
+                        alias = str(alias_value) if alias_value else ''
+
+                    # Create new detection
+                    new_detection = {
+                        'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                        'confidence': 1.0,  # Manually added, so confidence is 1.0
+                        'area': int(area),
+                        'center_y': int(center_y),
+                        'mask': saved_mask,
+                        'enabled': enabled,
+                        'alias': alias
+                    }
+
+                    detections.append(new_detection)
+                    data_loaded += 1
+                    logger.info(
+                        f"Loaded manually-added person {i+1} "
+                        f"(alias: '{alias}', enabled: {enabled}, bbox: {saved_bbox})"
+                    )
+
+            if data_loaded > 0:
+                logger.info(f"Loaded detection data from {mask_file_path.name}")
+                return True
+            else:
+                logger.warning(f"No matching detection data found in {mask_file_path.name}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to load detection data from {mask_file_path}: {e}")
+            return False
 
     def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
         """
@@ -634,7 +773,7 @@ class MultiPersonTagger(AutoCaptioningModel):
         2. If no people: fall back to standard WD Tagger on full image
         3. For each person: crop, tag with WD Tagger
         4. Tag full image and extract scene tags
-        5. Format output as "person1: tags, person2: tags, scene: tags"
+        5. Format output as "person1, tags, person2, tags, scene, tags"
 
         Args:
             model_inputs: PIL Image
@@ -707,6 +846,10 @@ class MultiPersonTagger(AutoCaptioningModel):
                 # Standard detection (no splitting)
                 detections = self.person_detector.detect_people(str(temp_path))
 
+            # Load edited masks from sidecar file if available
+            if detections and image and hasattr(image, 'path'):
+                self._load_edited_masks(image.path, detections)
+
             # Step 2: If no people detected, fall back to standard WD Tagger
             if not detections:
                 logger.info("No people detected, using standard WD Tagger")
@@ -718,10 +861,35 @@ class MultiPersonTagger(AutoCaptioningModel):
                 caption = self.thread.tag_separator.join(tags)
                 return caption, caption
 
-            # Step 3: Tag each detected person
+            # Step 3: Tag each detected person (skip disabled ones)
             person_tags_list = []
+            person_aliases = []  # Track aliases for enabled people
+            enabled_person_index = 0  # Counter for enabled people only
             for i, detection in enumerate(detections):
+                # Skip if person is disabled
+                if not detection.get('enabled', True):
+                    logger.info(f"Skipping person {i+1} (disabled)")
+                    continue
+
                 try:
+                    # Store alias for this person (for output formatting)
+                    # Use detection alias if set, otherwise fall back to control panel aliases
+                    detection_alias = detection.get('alias', '').strip()
+                    if detection_alias:
+                        # Use alias from preview dialog
+                        person_aliases.append(detection_alias)
+                        logger.debug(f"Person {i+1}: using preview dialog alias '{detection_alias}'")
+                    elif enabled_person_index < len(self.person_aliases):
+                        # Use alias from control panel settings
+                        control_panel_alias = self.person_aliases[enabled_person_index]
+                        person_aliases.append(control_panel_alias)
+                        logger.debug(f"Person {i+1}: using control panel alias '{control_panel_alias}'")
+                    else:
+                        # No alias available
+                        person_aliases.append('')
+                        logger.debug(f"Person {i+1}: no alias")
+
+                    enabled_person_index += 1
                     # Extract person using segmentation or bbox+masking
                     if self.masking_method == 'Segmentation' and detection.get('mask') is not None:
                         # Extract ONLY the segmented person on white background
@@ -796,8 +964,8 @@ class MultiPersonTagger(AutoCaptioningModel):
                     logger.error(f"Error extracting scene tags: {e}")
                     scene_tags = []
 
-            # Step 5: Format output
-            caption = self._format_output(person_tags_list, scene_tags)
+            # Step 5: Format output (with person aliases)
+            caption = self._format_output(person_tags_list, scene_tags, person_aliases)
             return caption, caption
 
         finally:
@@ -811,7 +979,8 @@ class MultiPersonTagger(AutoCaptioningModel):
     def _format_output(
         self,
         person_tags_list: list[list[str]],
-        scene_tags: list[str]
+        scene_tags: list[str],
+        person_aliases: list[str] = None
     ) -> str:
         """
         Format output as structured text.
@@ -819,27 +988,31 @@ class MultiPersonTagger(AutoCaptioningModel):
         Args:
             person_tags_list: List of tag lists, one per person
             scene_tags: List of scene tags
+            person_aliases: Optional list of aliases for each person
 
         Returns:
             Formatted string with person aliases or default personN labels
         """
+        if person_aliases is None:
+            person_aliases = []
+
         parts = []
 
         # Add person tags
         for i, tags in enumerate(person_tags_list):
             if tags:  # Only include if person has tags
-                # Use alias if available, otherwise fall back to personN
-                if i < len(self.person_aliases):
-                    person_label = self.person_aliases[i]
+                # Use alias if available and non-empty, otherwise fall back to personN
+                if i < len(person_aliases) and person_aliases[i]:
+                    person_label = person_aliases[i]
                 else:
                     person_label = f"person{i+1}"
 
-                person_str = f"{person_label}: {self.thread.tag_separator.join(tags)}"
+                person_str = f"{person_label}, {self.thread.tag_separator.join(tags)}"
                 parts.append(person_str)
 
         # Add scene tags
         if scene_tags:
-            scene_str = f"scene: {self.thread.tag_separator.join(scene_tags)}"
+            scene_str = f"scene, {self.thread.tag_separator.join(scene_tags)}"
             parts.append(scene_str)
 
         # Join all parts with newline
