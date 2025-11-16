@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QDialog,
                                QGraphicsPixmapItem, QGraphicsScene,
                                QGraphicsView, QHBoxLayout, QHeaderView, QLabel,
                                QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QScrollArea, QTableWidget,
+                               QPushButton, QScrollArea, QSlider, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
 from auto_captioning.captioning_thread import CaptioningThread
@@ -286,8 +286,12 @@ class DetectionPreviewDialog(QDialog):
         self.selected_person_label.setStyleSheet("font-weight: bold; color: #0066cc;")
 
         self.reset_masks_button = QPushButton("Reset All")
-        self.reset_masks_button.setToolTip("Reset all masks to original state")
+        self.reset_masks_button.setToolTip("Reset all masks to original state (in memory only)")
         self.reset_masks_button.clicked.connect(self.reset_masks)
+
+        self.delete_masks_button = QPushButton("Delete File")
+        self.delete_masks_button.setToolTip("Delete the saved .masks.npz file from disk")
+        self.delete_masks_button.clicked.connect(self.delete_edited_masks)
 
         mask_edit_layout.addWidget(self.edit_mode_checkbox)
         mask_edit_layout.addWidget(self.paint_mode_label)
@@ -299,6 +303,7 @@ class DetectionPreviewDialog(QDialog):
         mask_edit_layout.addWidget(self.selected_person_label)
         mask_edit_layout.addStretch()
         mask_edit_layout.addWidget(self.reset_masks_button)
+        mask_edit_layout.addWidget(self.delete_masks_button)
 
         # Hide editing controls initially
         self.paint_mode_label.hide()
@@ -309,6 +314,7 @@ class DetectionPreviewDialog(QDialog):
         self.brush_size_value_label.hide()
         self.selected_person_label.hide()
         self.reset_masks_button.hide()
+        self.delete_masks_button.hide()
 
         self.mask_edit_container.hide()
         layout.addWidget(self.mask_edit_container)
@@ -906,8 +912,104 @@ class DetectionPreviewDialog(QDialog):
         # Update the detection's mask
         detection['mask'] = mask
 
+        # Save edited masks to disk
+        self.save_edited_masks()
+
         # Re-draw to show changes
         self.redraw_with_highlight()
+
+    def save_edited_masks(self):
+        """Save edited masks to a sidecar .masks.npz file."""
+        if not self.image_path or not self.current_detections:
+            return
+
+        # Create sidecar file path
+        mask_file_path = Path(self.image_path).with_suffix(Path(self.image_path).suffix + '.masks.npz')
+
+        # Prepare mask data to save
+        mask_data = {}
+        for i, detection in enumerate(self.current_detections):
+            mask = detection.get('mask')
+            if mask is not None:
+                # Store mask and bbox for matching
+                mask_data[f'person_{i}_mask'] = mask
+                mask_data[f'person_{i}_bbox'] = np.array(detection['bbox'])
+
+        # Save to compressed numpy format
+        try:
+            np.savez_compressed(mask_file_path, **mask_data)
+            logger.info(f"Saved edited masks to {mask_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save edited masks: {e}")
+
+    def load_edited_masks(self):
+        """Load edited masks from sidecar .masks.npz file if it exists."""
+        if not self.image_path or not self.current_detections:
+            return False
+
+        # Check for sidecar file
+        mask_file_path = Path(self.image_path).with_suffix(Path(self.image_path).suffix + '.masks.npz')
+
+        if not mask_file_path.exists():
+            return False
+
+        try:
+            # Load mask data
+            mask_data = np.load(mask_file_path)
+
+            # Apply masks to detections by matching bboxes
+            for i, detection in enumerate(self.current_detections):
+                person_key = f'person_{i}_mask'
+                bbox_key = f'person_{i}_bbox'
+
+                if person_key in mask_data and bbox_key in mask_data:
+                    # Verify bbox matches (detections should be consistent)
+                    saved_bbox = mask_data[bbox_key]
+                    current_bbox = np.array(detection['bbox'])
+
+                    # Allow small differences due to detection variance
+                    if np.allclose(saved_bbox, current_bbox, atol=10):
+                        detection['mask'] = mask_data[person_key]
+                        logger.debug(f"Loaded edited mask for person {i+1}")
+                    else:
+                        logger.warning(f"Bbox mismatch for person {i+1}, skipping edited mask")
+
+            logger.info(f"Loaded edited masks from {mask_file_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load edited masks: {e}")
+            return False
+
+    def delete_edited_masks(self):
+        """Delete the sidecar .masks.npz file."""
+        if not self.image_path:
+            return
+
+        mask_file_path = Path(self.image_path).with_suffix(Path(self.image_path).suffix + '.masks.npz')
+
+        if mask_file_path.exists():
+            try:
+                mask_file_path.unlink()
+                logger.info(f"Deleted edited masks file: {mask_file_path}")
+                QMessageBox.information(
+                    self,
+                    "Masks Deleted",
+                    "Edited masks file has been deleted. Refresh to see original masks."
+                )
+            except Exception as e:
+                logger.error(f"Failed to delete edited masks file: {e}")
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to delete edited masks file: {e}"
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "No Edited Masks",
+                "No edited masks file found for this image."
+            )
 
     def update_detection_table(self, detections: list):
         """Update the detection info table."""
