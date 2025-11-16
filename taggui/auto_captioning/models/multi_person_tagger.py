@@ -46,6 +46,7 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.detection_max_people = caption_settings.get('detection_max_people', 10)
         self.crop_padding = caption_settings.get('crop_padding', 10)
         self.yolo_model_size = caption_settings.get('yolo_model_size', 'm')
+        self.split_merged_people = caption_settings.get('split_merged_people', True)
         self.mask_overlapping_people = caption_settings.get('mask_overlapping_people', True)
         self.masking_method = caption_settings.get('masking_method', 'Bounding box')
         self.preserve_target_bbox = caption_settings.get('preserve_target_bbox', True)
@@ -95,6 +96,115 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.processor = self.get_processor()
         self.model = self.get_model()
 
+    @staticmethod
+    def parse_person_count_from_tags(tags: tuple[str, ...]) -> int:
+        """
+        Parse expected person count from WD Tagger tags.
+
+        Looks for tags like '2boys', '3girls', '1boy', '1girl', 'solo', etc.
+
+        Args:
+            tags: Tuple of tag strings from WD Tagger
+
+        Returns:
+            Expected number of people (0 if cannot determine)
+        """
+        import re
+
+        person_count = 0
+
+        # Patterns to match
+        # Match Nboys, Ngirls (e.g., "2boys", "3girls", "6+boys")
+        for tag in tags:
+            # Match patterns like "2boys", "3girls", "4+boys"
+            match = re.match(r'(\d+)\+?(boy|girl)s?', tag)
+            if match:
+                count = int(match.group(1))
+                person_count += count
+                continue
+
+            # Match "1boy", "1girl"
+            if tag in ('1boy', '1girl'):
+                person_count += 1
+                continue
+
+            # Match "solo" = 1 person
+            if tag == 'solo':
+                person_count = max(person_count, 1)
+                continue
+
+        return person_count
+
+    @staticmethod
+    def split_detection_by_connected_components(detection: dict) -> list[dict]:
+        """
+        Split a single detection into multiple detections based on connected components.
+
+        Uses segmentation mask to find separate connected blobs and creates
+        individual detections with bounding boxes for each.
+
+        Args:
+            detection: Detection dict with 'mask', 'bbox', 'confidence', etc.
+
+        Returns:
+            List of detection dicts (one per connected component).
+            If no mask or only 1 component, returns original detection in a list.
+        """
+        import cv2
+
+        mask = detection.get('mask')
+        if mask is None:
+            # No mask available, cannot split
+            logger.debug("Cannot split detection: no segmentation mask")
+            return [detection]
+
+        # Convert boolean mask to uint8 for OpenCV
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+
+        # Find connected components
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            mask_uint8, connectivity=8
+        )
+
+        # Label 0 is background, so actual components start at 1
+        num_components = num_labels - 1
+
+        if num_components <= 1:
+            # Only one blob, no need to split
+            logger.debug(f"Detection has only {num_components} component(s), not splitting")
+            return [detection]
+
+        logger.info(f"Splitting detection into {num_components} components")
+
+        split_detections = []
+
+        for i in range(1, num_labels):  # Skip background (0)
+            # Create mask for this component
+            component_mask = (labels == i)
+
+            # Get bounding box from stats
+            # stats format: [left, top, width, height, area]
+            x, y, w, h, area = stats[i]
+
+            # Skip very small components (noise)
+            if area < 100:  # Minimum 100 pixels
+                logger.debug(f"Skipping component {i}: area {area} too small")
+                continue
+
+            # Create new detection for this component
+            new_detection = {
+                'bbox': [x, y, x + w, y + h],
+                'confidence': detection['confidence'],  # Keep original confidence
+                'area': w * h,  # Bbox area
+                'center_y': y + h // 2,
+                'mask': component_mask
+            }
+
+            split_detections.append(new_detection)
+            logger.debug(f"Created component {i}: bbox=({x},{y},{x+w},{y+h}), area={area}")
+
+        return split_detections if split_detections else [detection]
+
     def get_processor(self):
         """No processor needed for WD Tagger-based models."""
         return None
@@ -108,9 +218,13 @@ class MultiPersonTagger(AutoCaptioningModel):
         logger.info("Loading multi-person tagger components...")
 
         # Initialize PersonDetector for YOLO
-        # Use segmentation model if masking method is 'Segmentation'
-        use_segmentation = (self.mask_overlapping_people and
-                           self.masking_method == 'Segmentation')
+        # Use segmentation model if:
+        # 1. Masking method is 'Segmentation', OR
+        # 2. Split merged people is enabled (requires segmentation masks)
+        use_segmentation = (
+            (self.mask_overlapping_people and self.masking_method == 'Segmentation') or
+            self.split_merged_people
+        )
         self.person_detector = PersonDetector(
             model_size=self.yolo_model_size,
             device=str(self.device),
@@ -435,6 +549,51 @@ class MultiPersonTagger(AutoCaptioningModel):
         try:
             # Step 1: Detect people
             detections = self.person_detector.detect_people(str(temp_path))
+
+            # Step 1.5: Attempt to split merged detections if enabled
+            if self.split_merged_people and detections:
+                # Tag full image to get expected person count
+                logger.info("Split merged people enabled: tagging full image to get expected count")
+                image_array = self._preprocess_image_for_wd_tagger(pil_image)
+                full_image_tags, _ = self.wd_model.generate_tags(
+                    image_array,
+                    self.wd_tagger_settings
+                )
+
+                expected_person_count = self.parse_person_count_from_tags(full_image_tags)
+                detected_person_count = len(detections)
+
+                logger.info(
+                    f"Expected people: {expected_person_count}, "
+                    f"Detected people: {detected_person_count}"
+                )
+
+                # If we detected fewer people than expected, try to split
+                if expected_person_count > detected_person_count > 0:
+                    logger.info(
+                        f"Attempting to split {detected_person_count} detection(s) "
+                        f"to match expected {expected_person_count}"
+                    )
+
+                    new_detections = []
+                    for detection in detections:
+                        split = self.split_detection_by_connected_components(detection)
+                        new_detections.extend(split)
+
+                    logger.info(f"After splitting: {len(new_detections)} detection(s)")
+
+                    # Sort by area (largest first), then by Y position (top to bottom)
+                    new_detections.sort(key=lambda d: (-d['area'], d['center_y']))
+
+                    # Limit to max_people
+                    if len(new_detections) > self.detection_max_people:
+                        logger.warning(
+                            f"Split resulted in {len(new_detections)} detections, "
+                            f"limiting to {self.detection_max_people}"
+                        )
+                        new_detections = new_detections[:self.detection_max_people]
+
+                    detections = new_detections
 
             # Step 2: If no people detected, fall back to standard WD Tagger
             if not detections:

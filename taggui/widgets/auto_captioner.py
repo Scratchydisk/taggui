@@ -245,6 +245,7 @@ class DetectionPreviewDialog(QDialog):
                 'detection_max_people': self.settings_form.detection_max_people_spin_box.value(),
                 'crop_padding': self.settings_form.crop_padding_spin_box.value(),
                 'yolo_model_size': self.settings_form.yolo_model_size_combo_box.currentText(),
+                'split_merged_people': self.settings_form.split_merged_people_check_box.isChecked(),
                 'mask_overlapping_people': self.settings_form.mask_overlaps_check_box.isChecked(),
                 'masking_method': self.settings_form.masking_method_combo_box.currentText(),
                 'preserve_target_bbox': self.settings_form.preserve_target_bbox_check_box.isChecked(),
@@ -722,6 +723,13 @@ class CaptionSettingsForm(QVBoxLayout):
         self.yolo_model_size_combo_box.addItems(['n', 's', 'm', 'l', 'x'])
         self.yolo_model_size_combo_box.setCurrentText('m')
 
+        self.split_merged_people_check_box = SettingsBigCheckBox(
+            key='split_merged_people', default=True)
+        self.split_merged_people_check_box.setToolTip(
+            'Attempt to split merged people when YOLO detects fewer people than expected.\n'
+            'Uses full-image tagging to determine expected person count, then splits merged\n'
+            'detections using segmentation mask analysis. Requires segmentation model.')
+
         self.mask_overlaps_check_box = SettingsBigCheckBox(
             key='mask_overlapping_people', default=True)
         self.mask_overlaps_check_box.setToolTip(
@@ -785,33 +793,49 @@ class CaptionSettingsForm(QVBoxLayout):
         self.wd_model_combo_box.setCurrentText('SmilingWolf/wd-eva02-large-tagger-v3')
         wd_model_form.addRow('WD Tagger model', self.wd_model_combo_box)
 
+        # Basic multi-person settings (most commonly adjusted)
         multi_person_settings_form.addRow('Detection confidence',
                                           self.detection_confidence_spin_box)
-        multi_person_settings_form.addRow('Minimum person size (px)',
-                                          self.detection_min_size_spin_box)
         multi_person_settings_form.addRow('Maximum people',
                                           self.detection_max_people_spin_box)
-        multi_person_settings_form.addRow('Crop padding (px)',
-                                          self.crop_padding_spin_box)
-        multi_person_settings_form.addRow('YOLO model size',
-                                          self.yolo_model_size_combo_box)
-        multi_person_settings_form.addRow('Mask overlapping people',
-                                          self.mask_overlaps_check_box)
-        multi_person_settings_form.addRow('Masking method',
-                                          self.masking_method_combo_box)
-        multi_person_settings_form.addRow('Preserve target bbox (segmentation)',
-                                          self.preserve_target_bbox_check_box)
+        multi_person_settings_form.addRow(person_aliases_form)
         multi_person_settings_form.addRow('Include scene tags',
                                           self.include_scene_tags_check_box)
-        multi_person_settings_form.addRow('Maximum scene tags',
-                                          self.max_scene_tags_spin_box)
-        multi_person_settings_form.addRow('Maximum tags per person',
-                                          self.max_tags_per_person_spin_box)
-        multi_person_settings_form.addRow(person_aliases_form)
         multi_person_settings_form.addRow(self.preview_detection_button)
         multi_person_settings_form.addRow(wd_model_form)
 
-        # Also add WD Tagger min_probability and max_tags for multi-person
+        # Advanced multi-person settings toggle button
+        self.toggle_advanced_mp_settings_button = TallPushButton(
+            'Show Advanced Settings')
+
+        # Advanced multi-person settings container
+        self.advanced_mp_settings_container = QWidget()
+        advanced_mp_settings_form = QFormLayout(
+            self.advanced_mp_settings_container)
+        advanced_mp_settings_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        advanced_mp_settings_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        advanced_mp_settings_form.addRow('Minimum person size (px)',
+                                          self.detection_min_size_spin_box)
+        advanced_mp_settings_form.addRow('Crop padding (px)',
+                                          self.crop_padding_spin_box)
+        advanced_mp_settings_form.addRow('YOLO model size',
+                                          self.yolo_model_size_combo_box)
+        advanced_mp_settings_form.addRow('Attempt to split merged people',
+                                          self.split_merged_people_check_box)
+        advanced_mp_settings_form.addRow('Mask overlapping people',
+                                          self.mask_overlaps_check_box)
+        advanced_mp_settings_form.addRow('Masking method',
+                                          self.masking_method_combo_box)
+        advanced_mp_settings_form.addRow('Preserve target bbox (segmentation)',
+                                          self.preserve_target_bbox_check_box)
+        advanced_mp_settings_form.addRow('Maximum scene tags',
+                                          self.max_scene_tags_spin_box)
+        advanced_mp_settings_form.addRow('Maximum tags per person',
+                                          self.max_tags_per_person_spin_box)
+
+        # WD Tagger advanced settings for multi-person
         self.mp_min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
             key='mp_wd_tagger_min_probability', default=0.35, minimum=0.01,
             maximum=1)
@@ -829,9 +853,16 @@ class CaptionSettingsForm(QVBoxLayout):
         mp_tags_to_exclude_form.addRow('Tags to exclude',
                                        self.mp_tags_to_exclude_text_edit)
 
-        multi_person_settings_form.addRow('Tag confidence threshold',
+        advanced_mp_settings_form.addRow('Tag confidence threshold',
                                           self.mp_min_probability_spin_box)
-        multi_person_settings_form.addRow(mp_tags_to_exclude_form)
+        advanced_mp_settings_form.addRow(mp_tags_to_exclude_form)
+
+        # Hide advanced settings by default
+        self.advanced_mp_settings_container.hide()
+
+        # Add toggle button and container to main form
+        multi_person_settings_form.addRow(self.toggle_advanced_mp_settings_button)
+        multi_person_settings_form.addRow(self.advanced_mp_settings_container)
 
         self.toggle_advanced_settings_form_button = TallPushButton(
             'Show Advanced Settings')
@@ -921,6 +952,8 @@ class CaptionSettingsForm(QVBoxLayout):
             self.set_load_in_4_bit_visibility)
         self.toggle_advanced_settings_form_button.clicked.connect(
             self.toggle_advanced_settings_form)
+        self.toggle_advanced_mp_settings_button.clicked.connect(
+            self.toggle_advanced_mp_settings)
         # Make sure the minimum new token count is less than or equal to the
         # maximum new token count.
         self.min_new_token_count_spin_box.valueChanged.connect(
@@ -1014,6 +1047,17 @@ class CaptionSettingsForm(QVBoxLayout):
             self.toggle_advanced_settings_form_button.setText(
                 'Show Advanced Settings')
 
+    @Slot()
+    def toggle_advanced_mp_settings(self):
+        if self.advanced_mp_settings_container.isHidden():
+            self.advanced_mp_settings_container.show()
+            self.toggle_advanced_mp_settings_button.setText(
+                'Hide Advanced Settings')
+        else:
+            self.advanced_mp_settings_container.hide()
+            self.toggle_advanced_mp_settings_button.setText(
+                'Show Advanced Settings')
+
     def get_caption_settings(self) -> dict:
         return {
             'model_id': self.model_combo_box.currentText(),
@@ -1054,6 +1098,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'detection_max_people': self.detection_max_people_spin_box.value(),
             'crop_padding': self.crop_padding_spin_box.value(),
             'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
+            'split_merged_people': self.split_merged_people_check_box.isChecked(),
             'mask_overlapping_people': self.mask_overlaps_check_box.isChecked(),
             'masking_method': self.masking_method_combo_box.currentText(),
             'preserve_target_bbox': self.preserve_target_bbox_check_box.isChecked(),
