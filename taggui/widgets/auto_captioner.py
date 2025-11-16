@@ -223,11 +223,13 @@ class DetectionPreviewDialog(QDialog):
         settings = self.detection_settings
         mask_status = "enabled" if settings.get('mask_overlapping_people', True) else "disabled"
         mask_method = settings.get('masking_method', 'Bounding box')
+        split_status = "enabled" if settings.get('split_merged_people', True) else "disabled"
         text = (
             f"Settings: Confidence={settings.get('detection_confidence', 0.5):.2f}, "
             f"MinSize={settings.get('detection_min_size', 50)}px, "
             f"Padding={settings.get('crop_padding', 10)}px, "
             f"YOLO={settings.get('yolo_model_size', 'm')}, "
+            f"Split={split_status}, "
             f"Masking={mask_status} ({mask_method})"
         )
         self.settings_label.setText(text)
@@ -266,7 +268,8 @@ class DetectionPreviewDialog(QDialog):
             # Determine if segmentation should be used
             mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
             masking_method = self.detection_settings.get('masking_method', 'Bounding box')
-            use_segmentation = mask_overlapping and masking_method == 'Segmentation'
+            split_merged_people = self.detection_settings.get('split_merged_people', True)
+            use_segmentation = (mask_overlapping and masking_method == 'Segmentation') or split_merged_people
 
             # Create PersonDetector with current settings
             detector = PersonDetector(
@@ -280,6 +283,59 @@ class DetectionPreviewDialog(QDialog):
 
             # Run detection
             detections = detector.detect_people(self.image_path)
+            original_detection_count = len(detections)
+
+            # Apply split merged people if enabled
+            if split_merged_people and detections:
+                from auto_captioning.models.multi_person_tagger import MultiPersonTagger
+                from auto_captioning.models.wd_tagger import WdTaggerModel
+                import numpy as np
+
+                # Load image for WD Tagger
+                pil_image = PilImage.open(self.image_path).convert('RGBA')
+
+                # Initialize WD Tagger model (using default model)
+                wd_model_id = self.settings_form.wd_model_combo_box.currentText()
+                wd_model = WdTaggerModel(wd_model_id)
+
+                # Preprocess for WD Tagger (simplified version)
+                canvas = PilImage.new('RGBA', pil_image.size, (255, 255, 255))
+                canvas.alpha_composite(pil_image)
+                pil_image_rgb = canvas.convert('RGB')
+                max_dimension = max(pil_image_rgb.size)
+                canvas = PilImage.new('RGB', (max_dimension, max_dimension), (255, 255, 255))
+                horizontal_padding = (max_dimension - pil_image_rgb.width) // 2
+                vertical_padding = (max_dimension - pil_image_rgb.height) // 2
+                canvas.paste(pil_image_rgb, (horizontal_padding, vertical_padding))
+                _, input_dimension, *_ = wd_model.inference_session.get_inputs()[0].shape
+                if max_dimension != input_dimension:
+                    canvas = canvas.resize((input_dimension, input_dimension), resample=PilImage.Resampling.BICUBIC)
+                image_array = np.array(canvas, dtype=np.float32)[:, :, ::-1]
+                image_array = np.expand_dims(image_array, axis=0)
+
+                # Get tags
+                wd_settings = {'show_probabilities': False, 'min_probability': 0.35, 'max_tags': 50, 'tags_to_exclude': ''}
+                full_image_tags, _ = wd_model.generate_tags(image_array, wd_settings)
+
+                # Parse expected person count
+                expected_person_count = MultiPersonTagger.parse_person_count_from_tags(full_image_tags)
+
+                # Apply splitting if needed
+                if expected_person_count > len(detections) > 0:
+                    new_detections = []
+                    for detection in detections:
+                        split = MultiPersonTagger.split_detection_by_connected_components(detection)
+                        new_detections.extend(split)
+
+                    # Sort by area (largest first), then by Y position
+                    new_detections.sort(key=lambda d: (-d['area'], d['center_y']))
+
+                    # Limit to max_people
+                    max_people = self.detection_settings.get('detection_max_people', 10)
+                    if len(new_detections) > max_people:
+                        new_detections = new_detections[:max_people]
+
+                    detections = new_detections
 
             # Load image
             pil_image = PilImage.open(self.image_path).convert('RGB')
@@ -320,8 +376,14 @@ class DetectionPreviewDialog(QDialog):
             # Check if segmentation masks are present
             masks_present = any(d.get('mask') is not None for d in detections)
             mask_info = f" (segmentation masks: {'yes' if masks_present else 'no'})" if use_segmentation else ""
+
+            # Show split info if splitting was applied
+            split_info = ""
+            if split_merged_people and original_detection_count != count:
+                split_info = f" [split from {original_detection_count}]"
+
             self.detection_count_label.setText(
-                f"{count} {'person' if count == 1 else 'people'} detected{mask_info}"
+                f"{count} {'person' if count == 1 else 'people'} detected{split_info}{mask_info}"
             )
 
             # Update table
