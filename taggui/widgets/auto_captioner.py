@@ -2,6 +2,7 @@ import sys
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 from PIL import Image as PilImage, ImageDraw
 from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFontMetrics, QImage, QMovie, QPainter, QPen, QPixmap, QTextCursor, QWheelEvent
@@ -186,16 +187,37 @@ class DetectionPreviewDialog(QDialog):
         self.detection_table.itemSelectionChanged.connect(self.on_person_selected)
         layout.addWidget(self.detection_table)
 
+        # Crop previews scroll area (initially hidden)
+        self.crop_previews_label = QLabel("Crop Previews (what WD Tagger will see):")
+        self.crop_previews_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        self.crop_previews_label.hide()
+        layout.addWidget(self.crop_previews_label)
+
+        self.crop_previews_scroll = QScrollArea()
+        self.crop_previews_scroll.setWidgetResizable(True)
+        self.crop_previews_scroll.setMaximumHeight(200)
+        self.crop_previews_scroll.hide()
+
+        self.crop_previews_container = QWidget()
+        self.crop_previews_layout = QHBoxLayout(self.crop_previews_container)
+        self.crop_previews_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.crop_previews_scroll.setWidget(self.crop_previews_container)
+        layout.addWidget(self.crop_previews_scroll)
+
         # Buttons
         button_layout = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.run_detection)
         self.fit_button = QPushButton("Fit to View")
         self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
+        self.show_crops_button = QPushButton("Show Crops")
+        self.show_crops_button.clicked.connect(self.show_crop_previews)
+        self.show_crops_button.setEnabled(False)
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.refresh_button)
         button_layout.addWidget(self.fit_button)
+        button_layout.addWidget(self.show_crops_button)
         button_layout.addStretch()
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
@@ -251,6 +273,9 @@ class DetectionPreviewDialog(QDialog):
                 'mask_overlapping_people': self.settings_form.mask_overlaps_check_box.isChecked(),
                 'masking_method': self.settings_form.masking_method_combo_box.currentText(),
                 'preserve_target_bbox': self.settings_form.preserve_target_bbox_check_box.isChecked(),
+                'mask_erosion_size': self.settings_form.mask_erosion_spin_box.value(),
+                'mask_dilation_size': self.settings_form.mask_dilation_spin_box.value(),
+                'mask_blur_size': self.settings_form.mask_blur_spin_box.value(),
             }
             self.update_settings_display()
 
@@ -383,6 +408,9 @@ class DetectionPreviewDialog(QDialog):
 
             # Update table
             self.update_detection_table(detections)
+
+            # Enable show crops button if we have detections
+            self.show_crops_button.setEnabled(len(detections) > 0)
 
         except Exception as e:
             QMessageBox.critical(
@@ -658,6 +686,229 @@ class DetectionPreviewDialog(QDialog):
             self.detection_table.setItem(
                 i, 3, QTableWidgetItem(f"({x1},{y1},{x2},{y2})")
             )
+
+    def show_crop_previews(self):
+        """Generate and display crop previews showing what WD Tagger will see."""
+        if not self.current_detections or not self.current_image:
+            return
+
+        # Clear existing previews
+        while self.crop_previews_layout.count():
+            item = self.crop_previews_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Show loading indicator
+        self.loading_label.setText("⏳ Generating crop previews...")
+        self.loading_label.show()
+        self.show_crops_button.setEnabled(False)
+        QApplication.processEvents()
+
+        try:
+            from auto_captioning.models.multi_person_tagger import MultiPersonTagger
+
+            # Get masking settings
+            mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
+            masking_method = self.detection_settings.get('masking_method', 'Bounding box')
+            preserve_target_bbox = self.detection_settings.get('preserve_target_bbox', True)
+            padding = self.detection_settings.get('crop_padding', 10)
+
+            # Mask refinement settings
+            mask_erosion = self.detection_settings.get('mask_erosion_size', 0)
+            mask_dilation = self.detection_settings.get('mask_dilation_size', 0)
+            mask_blur = self.detection_settings.get('mask_blur_size', 0)
+
+            # Generate crops for each person
+            for i, detection in enumerate(self.current_detections):
+                # Apply masking if enabled
+                image_to_crop = self.current_image
+                if mask_overlapping and len(self.current_detections) > 1:
+                    # Apply the same masking logic as the tagger
+                    image_to_crop = self._generate_masked_image(
+                        self.current_image,
+                        detection,
+                        i,
+                        self.current_detections,
+                        padding,
+                        masking_method,
+                        preserve_target_bbox,
+                        mask_erosion,
+                        mask_dilation,
+                        mask_blur
+                    )
+
+                # Crop the person
+                bbox = detection['bbox']
+                x1, y1, x2, y2 = bbox
+                crop_x1 = max(0, x1 - padding)
+                crop_y1 = max(0, y1 - padding)
+                crop_x2 = min(image_to_crop.width, x2 + padding)
+                crop_y2 = min(image_to_crop.height, y2 + padding)
+
+                cropped = image_to_crop.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+                # Convert to QPixmap and display
+                # Scale to max 150px height for preview
+                max_height = 150
+                if cropped.height > max_height:
+                    aspect = cropped.width / cropped.height
+                    new_height = max_height
+                    new_width = int(aspect * new_height)
+                    cropped = cropped.resize((new_width, new_height), PilImage.Resampling.LANCZOS)
+
+                # Convert to QPixmap
+                buffer = BytesIO()
+                cropped.save(buffer, format='PNG')
+                buffer.seek(0)
+                qimage = QImage.fromData(buffer.getvalue())
+                pixmap = QPixmap.fromImage(qimage)
+
+                # Create label with image
+                crop_widget = QWidget()
+                crop_layout = QVBoxLayout(crop_widget)
+                crop_layout.setContentsMargins(5, 5, 5, 5)
+
+                image_label = QLabel()
+                image_label.setPixmap(pixmap)
+                image_label.setFrameStyle(QFrame.Shape.Box)
+
+                text_label = QLabel(f"Person {i+1}")
+                text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                text_label.setStyleSheet("font-weight: bold;")
+
+                crop_layout.addWidget(image_label)
+                crop_layout.addWidget(text_label)
+
+                self.crop_previews_layout.addWidget(crop_widget)
+
+            # Show the previews
+            self.crop_previews_label.show()
+            self.crop_previews_scroll.show()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Crop Preview Error",
+                f"Failed to generate crop previews: {str(e)}"
+            )
+
+        finally:
+            # Hide loading indicator and re-enable button
+            self.loading_label.hide()
+            self.show_crops_button.setEnabled(True)
+
+    def _generate_masked_image(
+        self,
+        image: PilImage.Image,
+        target_detection: dict,
+        target_index: int,
+        all_detections: list,
+        padding: int,
+        masking_method: str,
+        preserve_target_bbox: bool,
+        mask_erosion: int,
+        mask_dilation: int,
+        mask_blur: int
+    ) -> PilImage.Image:
+        """Generate masked image for a person (mimics tagger's masking logic)."""
+        import numpy as np
+        import cv2
+
+        # Create a copy to mask
+        masked_image = image.copy()
+        img_array = np.array(masked_image)
+
+        # Calculate the crop region
+        width, height = image.size
+        target_bbox = target_detection['bbox']
+        tx1, ty1, tx2, ty2 = target_bbox
+        crop_x1 = max(0, tx1 - padding)
+        crop_y1 = max(0, ty1 - padding)
+        crop_x2 = min(width, tx2 + padding)
+        crop_y2 = min(height, ty2 + padding)
+
+        # Determine grey value
+        num_channels = img_array.shape[2] if len(img_array.shape) == 3 else 1
+        grey_value = [127] * num_channels if num_channels > 1 else 127
+
+        # Protected region for target bbox
+        protected_region = None
+        if preserve_target_bbox and masking_method == 'Segmentation':
+            protected_region = np.zeros((height, width), dtype=bool)
+            protected_region[ty1:ty2, tx1:tx2] = True
+
+        # Mask other people
+        for i, detection in enumerate(all_detections):
+            if i == target_index:
+                continue
+
+            if masking_method == 'Segmentation' and detection.get('mask') is not None:
+                mask = detection['mask']
+
+                # Apply mask refinement
+                mask = self._apply_mask_refinement(
+                    mask, mask_erosion, mask_dilation, mask_blur
+                )
+
+                # Create crop mask
+                crop_mask = np.zeros_like(mask, dtype=bool)
+                crop_mask[crop_y1:crop_y2, crop_x1:crop_x2] = True
+
+                # Pixels to mask
+                pixels_to_mask = mask & crop_mask
+                if protected_region is not None:
+                    pixels_to_mask = pixels_to_mask & ~protected_region
+
+                if pixels_to_mask.any():
+                    img_array[pixels_to_mask] = grey_value
+
+            else:
+                # Bounding box masking
+                bbox = detection['bbox']
+                x1, y1, x2, y2 = bbox
+                if not (x2 < crop_x1 or x1 > crop_x2 or y2 < crop_y1 or y1 > crop_y2):
+                    overlap_x1 = max(x1, crop_x1)
+                    overlap_y1 = max(y1, crop_y1)
+                    overlap_x2 = min(x2, crop_x2)
+                    overlap_y2 = min(y2, crop_y2)
+                    img_array[overlap_y1:overlap_y2, overlap_x1:overlap_x2] = grey_value
+
+        return PilImage.fromarray(img_array)
+
+    def _apply_mask_refinement(
+        self,
+        mask: np.ndarray,
+        erosion_size: int,
+        dilation_size: int,
+        blur_size: int
+    ) -> np.ndarray:
+        """Apply morphological operations to refine mask."""
+        import cv2
+        import numpy as np
+
+        if erosion_size == 0 and dilation_size == 0 and blur_size == 0:
+            return mask
+
+        # Convert to uint8
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+
+        # Apply erosion
+        if erosion_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erosion_size, erosion_size))
+            mask_uint8 = cv2.erode(mask_uint8, kernel, iterations=1)
+
+        # Apply dilation
+        if dilation_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
+            mask_uint8 = cv2.dilate(mask_uint8, kernel, iterations=1)
+
+        # Apply blur
+        if blur_size > 0:
+            kernel_size = blur_size if blur_size % 2 == 1 else blur_size + 1
+            mask_uint8 = cv2.GaussianBlur(mask_uint8, (kernel_size, kernel_size), 0)
+
+        # Convert back to boolean
+        return mask_uint8 > 127
 
 
 class CaptionSettingsForm(QVBoxLayout):
@@ -1268,6 +1519,10 @@ class CaptionSettingsForm(QVBoxLayout):
             'yolo_model_size': self.yolo_model_size_combo_box.currentText(),
             'mask_overlapping_people': self.mask_overlaps_check_box.isChecked(),
             'masking_method': self.masking_method_combo_box.currentText(),
+            'preserve_target_bbox': self.preserve_target_bbox_check_box.isChecked(),
+            'mask_erosion_size': self.mask_erosion_spin_box.value(),
+            'mask_dilation_size': self.mask_dilation_spin_box.value(),
+            'mask_blur_size': self.mask_blur_spin_box.value(),
         }
 
         # Create or show dialog
