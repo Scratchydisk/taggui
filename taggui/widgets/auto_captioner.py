@@ -164,11 +164,215 @@ class ZoomableGraphicsView(QGraphicsView):
         x = int(scene_pos.x())
         y = int(scene_pos.y())
 
-        # Get brush size from dialog
-        brush_size = self.detection_dialog.brush_size_slider.value()
+        # Get brush size from selected person card
+        brush_size = 20  # default
+        if (self.detection_dialog.selected_card_index is not None and
+            self.detection_dialog.selected_card_index < len(self.detection_dialog.person_cards)):
+            selected_card = self.detection_dialog.person_cards[self.detection_dialog.selected_card_index]
+            brush_size = selected_card.brush_slider.value()
 
         # Paint on the mask
         self.detection_dialog.paint_mask_at(x, y, brush_size)
+
+
+class PersonCard(QWidget):
+    """Self-contained card widget for a detected person."""
+
+    def __init__(self, person_index, detection, parent_dialog):
+        super().__init__()
+        self.person_index = person_index
+        self.detection = detection
+        self.parent_dialog = parent_dialog
+        self.is_selected = False
+        self.is_expanded = False
+
+        self.setStyleSheet("""
+            PersonCard {
+                background-color: white;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+            }
+            PersonCard[selected="true"] {
+                border: 3px solid #2196F3;
+                background-color: #e3f2fd;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Header: Person number + select indicator
+        header_layout = QHBoxLayout()
+        self.person_label = QLabel(f"#{person_index + 1}")
+        self.person_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(self.person_label)
+        header_layout.addStretch()
+        self.select_indicator = QLabel("")
+        self.select_indicator.setStyleSheet("color: #2196F3; font-weight: bold;")
+        header_layout.addWidget(self.select_indicator)
+        layout.addLayout(header_layout)
+
+        # Thumbnail
+        self.thumbnail_label = QLabel()
+        self.thumbnail_label.setFixedSize(280, 180)
+        self.thumbnail_label.setStyleSheet("border: 1px solid #ccc; background-color: #f9f9f9;")
+        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumbnail_label.setScaledContents(False)
+        layout.addWidget(self.thumbnail_label)
+
+        # Alias input
+        alias_layout = QHBoxLayout()
+        alias_layout.addWidget(QLabel("Alias:"))
+        self.alias_input = QLineEdit()
+        self.alias_input.setPlaceholderText("e.g., singer")
+        self.alias_input.setText(detection.get('alias', ''))
+        self.alias_input.textChanged.connect(self.on_alias_changed)
+        alias_layout.addWidget(self.alias_input)
+        layout.addLayout(alias_layout)
+
+        # Enabled checkbox
+        self.enabled_checkbox = QCheckBox("Enabled for tagging")
+        self.enabled_checkbox.setChecked(detection.get('enabled', True))
+        self.enabled_checkbox.stateChanged.connect(self.on_enabled_changed)
+        layout.addWidget(self.enabled_checkbox)
+
+        # Action buttons
+        action_layout = QHBoxLayout()
+        self.inverse_button = QPushButton("Inverse")
+        self.inverse_button.setToolTip("Create new person from everything except this")
+        self.inverse_button.clicked.connect(self.on_inverse_clicked)
+        action_layout.addWidget(self.inverse_button)
+
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
+        self.delete_button.clicked.connect(self.on_delete_clicked)
+        action_layout.addWidget(self.delete_button)
+        layout.addLayout(action_layout)
+
+        # Edit section (initially hidden, shown when selected)
+        self.edit_container = QWidget()
+        edit_layout = QVBoxLayout(self.edit_container)
+        edit_layout.setContentsMargins(0, 8, 0, 0)
+        edit_layout.setSpacing(6)
+
+        # Edit header
+        edit_header = QLabel("✏️ Edit Mask")
+        edit_header.setStyleSheet("font-weight: bold; color: #333; background-color: #e8f4f8; padding: 4px; border-radius: 3px;")
+        edit_layout.addWidget(edit_header)
+
+        # Paint/Erase mode
+        mode_layout = QHBoxLayout()
+        self.paint_radio = QPushButton("Paint")
+        self.paint_radio.setCheckable(True)
+        self.paint_radio.setChecked(True)
+        self.paint_radio.clicked.connect(lambda: self.set_brush_mode('paint'))
+        mode_layout.addWidget(self.paint_radio)
+
+        self.erase_radio = QPushButton("Erase")
+        self.erase_radio.setCheckable(True)
+        self.erase_radio.clicked.connect(lambda: self.set_brush_mode('erase'))
+        mode_layout.addWidget(self.erase_radio)
+        edit_layout.addLayout(mode_layout)
+
+        # Brush size
+        brush_layout = QHBoxLayout()
+        brush_layout.addWidget(QLabel("Size:"))
+        self.brush_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brush_slider.setMinimum(5)
+        self.brush_slider.setMaximum(100)
+        self.brush_slider.setValue(20)
+        self.brush_slider.valueChanged.connect(self.on_brush_size_changed)
+        brush_layout.addWidget(self.brush_slider)
+        self.brush_value_label = QLabel("20px")
+        brush_layout.addWidget(self.brush_value_label)
+        edit_layout.addLayout(brush_layout)
+
+        # Edit tools
+        tools_layout = QHBoxLayout()
+        self.polygon_button = QPushButton("Polygon")
+        self.polygon_button.setToolTip("Draw polygon to add/erase")
+        self.polygon_button.clicked.connect(self.on_polygon_clicked)
+        tools_layout.addWidget(self.polygon_button)
+
+        self.finish_button = QPushButton("✓ Finish")
+        self.finish_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        self.finish_button.clicked.connect(self.on_finish_editing)
+        tools_layout.addWidget(self.finish_button)
+        edit_layout.addLayout(tools_layout)
+
+        self.edit_container.hide()
+        layout.addWidget(self.edit_container)
+
+        # Make card clickable
+        self.mousePressEvent = self.on_card_clicked
+
+    def on_card_clicked(self, event):
+        """Handle card selection."""
+        self.parent_dialog.select_card(self.person_index)
+
+    def set_selected(self, selected):
+        """Update visual state when selected/deselected."""
+        self.is_selected = selected
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+        if selected:
+            self.select_indicator.setText("★")
+            self.edit_container.show()
+        else:
+            self.select_indicator.setText("")
+            self.edit_container.hide()
+
+    def set_thumbnail(self, pixmap):
+        """Set the thumbnail image."""
+        if pixmap:
+            scaled = pixmap.scaled(
+                self.thumbnail_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.thumbnail_label.setPixmap(scaled)
+
+    def on_alias_changed(self, text):
+        """Handle alias text change."""
+        self.detection['alias'] = text
+        self.parent_dialog.pending_mask_save = True
+
+    def on_enabled_changed(self, state):
+        """Handle enabled checkbox change."""
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.detection['enabled'] = enabled
+        self.parent_dialog.pending_mask_save = True
+        self.parent_dialog.redraw_with_highlight()
+
+    def on_inverse_clicked(self):
+        """Create inverse crop from this person."""
+        self.parent_dialog.create_inverse_crop()
+
+    def on_delete_clicked(self):
+        """Delete this person."""
+        self.parent_dialog.delete_selected_person()
+
+    def set_brush_mode(self, mode):
+        """Set paint or erase mode."""
+        self.parent_dialog.brush_mode = mode
+        self.paint_radio.setChecked(mode == 'paint')
+        self.erase_radio.setChecked(mode == 'erase')
+
+    def on_brush_size_changed(self, value):
+        """Handle brush size change."""
+        self.brush_value_label.setText(f"{value}px")
+        # Brush size is read from selected card's slider in paint_mask_at()
+
+    def on_polygon_clicked(self):
+        """Start polygon select mode."""
+        self.parent_dialog.start_polygon_select()
+
+    def on_finish_editing(self):
+        """Finish editing and save."""
+        self.parent_dialog.finish_editing_person()
 
 
 class DetectionPreviewDialog(QDialog):
@@ -203,15 +407,136 @@ class DetectionPreviewDialog(QDialog):
         self.current_image = None
         self.highlighted_person = None  # Index of highlighted person (None = all)
 
-        # Main layout
-        layout = QVBoxLayout(self)
+        # Main layout - horizontal split (sidebar | image)
+        main_layout = QHBoxLayout(self)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Settings display
+        # ========== LEFT SIDEBAR ==========
+        sidebar = QWidget()
+        sidebar.setMaximumWidth(320)
+        sidebar.setMinimumWidth(320)
+        sidebar.setStyleSheet("""
+            QWidget {
+                background-color: #f5f5f5;
+            }
+        """)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(10, 10, 10, 10)
+        sidebar_layout.setSpacing(10)
+
+        # Settings display (collapsible)
         self.settings_label = QLabel()
         self.settings_label.setWordWrap(True)
-        layout.addWidget(self.settings_label)
+        self.settings_label.setStyleSheet("font-size: 10px; color: #666; padding: 5px;")
+        sidebar_layout.addWidget(self.settings_label)
 
-        # Loading indicator (prominent, centered)
+        # Detection section
+        detection_group = QFrame()
+        detection_group.setFrameStyle(QFrame.Shape.StyledPanel)
+        detection_group.setStyleSheet("QFrame { background-color: white; border-radius: 5px; }")
+        detection_layout = QVBoxLayout(detection_group)
+        detection_layout.setContentsMargins(10, 10, 10, 10)
+
+        detection_header = QLabel("DETECTION")
+        detection_header.setStyleSheet("font-weight: bold; color: #333;")
+        detection_layout.addWidget(detection_header)
+
+        # Detection buttons row
+        detection_buttons = QHBoxLayout()
+        self.reload_button = QPushButton("Reload")
+        self.reload_button.setToolTip("Reload saved detections and masks from disk")
+        self.reload_button.clicked.connect(self.reload_from_cache)
+        self.refresh_button = QPushButton("Re-detect")
+        self.refresh_button.setToolTip("Run fresh YOLO person detection and discard any edits")
+        self.refresh_button.clicked.connect(self.run_detection)
+        detection_buttons.addWidget(self.reload_button)
+        detection_buttons.addWidget(self.refresh_button)
+        detection_layout.addLayout(detection_buttons)
+
+        # Split merged people checkbox
+        self.split_merged_checkbox = QCheckBox("Split Merged People")
+        self.split_merged_checkbox.setToolTip(
+            "Automatically detect occluded/merged people using WD Tagger + iterative detection.\n"
+            "⚠️ Performance: ON = ~6s (automatic), OFF = ~0.4s (manual with Create Inverse)\n"
+            "Tip: For best speed, keep OFF and use 'Create Inverse' when needed."
+        )
+        self.split_merged_checkbox.setChecked(self.detection_settings.get('split_merged_people', True))
+        self.split_merged_checkbox.stateChanged.connect(self.on_split_merged_changed)
+        detection_layout.addWidget(self.split_merged_checkbox)
+
+        sidebar_layout.addWidget(detection_group)
+
+        # People section (scrollable)
+        people_group = QFrame()
+        people_group.setFrameStyle(QFrame.Shape.StyledPanel)
+        people_group.setStyleSheet("QFrame { background-color: white; border-radius: 5px; }")
+        people_layout = QVBoxLayout(people_group)
+        people_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.detection_count_label = QLabel("PEOPLE (0 found)")
+        self.detection_count_label.setStyleSheet("font-weight: bold; color: #333;")
+        people_layout.addWidget(self.detection_count_label)
+
+        # Scrollable person cards area
+        self.people_scroll = QScrollArea()
+        self.people_scroll.setWidgetResizable(True)
+        self.people_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.people_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+
+        self.people_container = QWidget()
+        self.people_container.setStyleSheet("background-color: transparent;")
+        self.people_layout = QVBoxLayout(self.people_container)
+        self.people_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.people_layout.setSpacing(8)
+        self.people_scroll.setWidget(self.people_container)
+        people_layout.addWidget(self.people_scroll)
+
+        sidebar_layout.addWidget(people_group, 1)  # Take remaining space
+
+        # Tools section
+        tools_group = QFrame()
+        tools_group.setFrameStyle(QFrame.Shape.StyledPanel)
+        tools_group.setStyleSheet("QFrame { background-color: white; border-radius: 5px; }")
+        tools_layout = QVBoxLayout(tools_group)
+        tools_layout.setContentsMargins(10, 10, 10, 10)
+
+        tools_header = QLabel("TOOLS")
+        tools_header.setStyleSheet("font-weight: bold; color: #333;")
+        tools_layout.addWidget(tools_header)
+
+        self.add_person_button = QPushButton("+ Add Person")
+        self.add_person_button.clicked.connect(self.add_manual_person)
+        self.add_person_button.setEnabled(False)
+        self.add_person_button.setToolTip("Manually add a person by painting a mask")
+        tools_layout.addWidget(self.add_person_button)
+
+        self.split_by_line_button = QPushButton("Split by Line")
+        self.split_by_line_button.clicked.connect(self.start_split_by_line)
+        self.split_by_line_button.setEnabled(False)
+        self.split_by_line_button.setToolTip("Draw a multi-segment line to split image")
+        tools_layout.addWidget(self.split_by_line_button)
+
+        self.fit_button = QPushButton("Fit to View")
+        self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
+        tools_layout.addWidget(self.fit_button)
+
+        sidebar_layout.addWidget(tools_group)
+
+        # Close button at bottom
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        sidebar_layout.addWidget(self.close_button)
+
+        main_layout.addWidget(sidebar)
+
+        # ========== RIGHT CONTENT AREA ==========
+        content_area = QWidget()
+        content_layout = QVBoxLayout(content_area)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(5)
+
+        # Loading indicator (prominent, centered, overlays content)
         self.loading_label = QLabel("⏳ Running detection, please wait...")
         self.loading_label.setStyleSheet(
             "color: #0066cc; font-weight: bold; font-size: 14px; "
@@ -219,22 +544,7 @@ class DetectionPreviewDialog(QDialog):
         )
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_label.hide()
-        layout.addWidget(self.loading_label)
-
-        # Zoom info layout
-        zoom_info_layout = QHBoxLayout()
-        self.zoom_label = QLabel("Mouse wheel to zoom, drag to pan")
-        self.zoom_label.setStyleSheet("color: #666; font-style: italic;")
-        zoom_info_layout.addWidget(self.zoom_label)
-        zoom_info_layout.addStretch()
-        layout.addLayout(zoom_info_layout)
-
-        # Image display with zoomable graphics view
-        self.graphics_view = ZoomableGraphicsView()
-        self.graphics_scene = QGraphicsScene()
-        self.graphics_view.setScene(self.graphics_scene)
-        self.graphics_view.setMinimumHeight(500)
-        layout.addWidget(self.graphics_view)
+        content_layout.addWidget(self.loading_label)
 
         # Mode banner with action hints
         self.mode_banner = QLabel("🟢 Normal Mode - Select a person to edit")
@@ -242,228 +552,43 @@ class DetectionPreviewDialog(QDialog):
             QLabel {
                 background-color: #4CAF50;
                 color: white;
-                padding: 10px;
+                padding: 8px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 13px;
                 border-radius: 5px;
             }
         """)
         self.mode_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.mode_banner)
+        content_layout.addWidget(self.mode_banner)
 
-        # Detection count label
-        self.detection_count_label = QLabel()
-        self.detection_count_label.setStyleSheet("font-weight: bold; padding: 5px;")
-        layout.addWidget(self.detection_count_label)
+        # Image display with zoomable graphics view
+        self.graphics_view = ZoomableGraphicsView()
+        self.graphics_scene = QGraphicsScene()
+        self.graphics_view.setScene(self.graphics_scene)
+        self.graphics_view.setMinimumHeight(500)
+        self.graphics_view.setMinimumWidth(600)
+        content_layout.addWidget(self.graphics_view)
 
-        # Status footer
-        self.status_footer = QLabel()
-        self.status_footer.setStyleSheet("color: #666; padding: 5px;")
-        layout.addWidget(self.status_footer)
+        # Zoom info
+        self.zoom_label = QLabel("Mouse wheel: zoom • Drag: pan")
+        self.zoom_label.setStyleSheet("color: #666; font-style: italic; font-size: 11px;")
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        content_layout.addWidget(self.zoom_label)
 
-        # Crop card gallery (replaces detection table)
-        self.cards_scroll = QScrollArea()
-        self.cards_scroll.setWidgetResizable(True)
-        self.cards_scroll.setMaximumHeight(280)
-        self.cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        main_layout.addWidget(content_area, 1)  # Take remaining space
 
-        self.cards_container = QWidget()
-        self.cards_layout = QHBoxLayout(self.cards_container)
-        self.cards_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.cards_layout.setSpacing(10)
-        self.cards_scroll.setWidget(self.cards_container)
-        layout.addWidget(self.cards_scroll)
-
-        # Properties panel for selected card
-        properties_frame = QFrame()
-        properties_frame.setFrameStyle(QFrame.Shape.StyledPanel)
-        properties_layout = QHBoxLayout(properties_frame)
-
-        self.alias_label = QLabel("Alias:")
-        self.alias_input = QLineEdit()
-        self.alias_input.setPlaceholderText("e.g., singer, guitarist")
-        self.alias_input.textChanged.connect(self.on_alias_changed)
-
-        self.enabled_checkbox_panel = QCheckBox("Enabled for tagging")
-        self.enabled_checkbox_panel.setChecked(True)
-        self.enabled_checkbox_panel.stateChanged.connect(self.on_enabled_changed_panel)
-
-        self.inverse_button = QPushButton("Create Inverse")
-        self.inverse_button.setToolTip("Create a new person from everything except this person")
-        self.inverse_button.clicked.connect(self.create_inverse_crop)
-
-        self.delete_person_button = QPushButton("Delete")
-        self.delete_person_button.setToolTip("Delete this person")
-        self.delete_person_button.clicked.connect(self.delete_selected_person)
-        self.delete_person_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
-
-        properties_layout.addWidget(self.alias_label)
-        properties_layout.addWidget(self.alias_input)
-        properties_layout.addWidget(self.enabled_checkbox_panel)
-        properties_layout.addWidget(self.inverse_button)
-        properties_layout.addWidget(self.delete_person_button)
-        properties_layout.addStretch()
-
-        layout.addWidget(properties_frame)
-
-        # Track selected person
-        self.selected_card_index = None
-        self.person_cards = []  # List of card widgets
-        self.thumbnail_cache = {}  # Cache thumbnails: key = (index, bbox_tuple) -> QPixmap
-
-        # Crop previews scroll area (initially hidden)
-        self.crop_previews_label = QLabel("Crop Previews (what WD Tagger will see):")
-        self.crop_previews_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        self.crop_previews_label.hide()
-        layout.addWidget(self.crop_previews_label)
-
-        self.crop_previews_scroll = QScrollArea()
-        self.crop_previews_scroll.setWidgetResizable(True)
-        self.crop_previews_scroll.setMaximumHeight(200)
-        self.crop_previews_scroll.hide()
-
-        self.crop_previews_container = QWidget()
-        self.crop_previews_layout = QHBoxLayout(self.crop_previews_container)
-        self.crop_previews_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self.crop_previews_scroll.setWidget(self.crop_previews_container)
-        layout.addWidget(self.crop_previews_scroll)
-
-        # Mask editing controls (initially hidden)
-        self.mask_edit_container = QWidget()
-        mask_edit_layout = QHBoxLayout(self.mask_edit_container)
-        mask_edit_layout.setContentsMargins(0, 5, 0, 5)
-
-        self.edit_mode_checkbox = QPushButton("Edit Masks")
-        self.edit_mode_checkbox.setCheckable(True)
-        self.edit_mode_checkbox.setToolTip("Enable mask editing mode to paint/erase masks")
-        self.edit_mode_checkbox.clicked.connect(self.toggle_edit_mode)
-
-        self.paint_mode_label = QLabel("Mode:")
-        self.paint_radio = QPushButton("Paint")
-        self.paint_radio.setCheckable(True)
-        self.paint_radio.setChecked(True)
-        self.erase_radio = QPushButton("Erase")
-        self.erase_radio.setCheckable(True)
-
-        # Make paint/erase mutually exclusive
-        self.paint_radio.clicked.connect(lambda: self.set_brush_mode('paint'))
-        self.erase_radio.clicked.connect(lambda: self.set_brush_mode('erase'))
-
-        self.brush_size_label = QLabel("Brush size:")
-        self.brush_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.brush_size_slider.setMinimum(5)
-        self.brush_size_slider.setMaximum(100)
-        self.brush_size_slider.setValue(20)
-        self.brush_size_slider.setMaximumWidth(150)
-        self.brush_size_value_label = QLabel("20px")
-        self.brush_size_slider.valueChanged.connect(
-            lambda v: self.brush_size_value_label.setText(f"{v}px"))
-
-        self.selected_person_label = QLabel("No person selected")
-        self.selected_person_label.setStyleSheet("font-weight: bold; color: #0066cc;")
-
-        self.finish_editing_button = QPushButton("✓ Finish Editing")
-        self.finish_editing_button.setToolTip("Save changes and update thumbnail for this person")
-        self.finish_editing_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
-        self.finish_editing_button.clicked.connect(self.finish_editing_person)
-
-        self.polygon_select_button = QPushButton("Polygon Select")
-        self.polygon_select_button.setToolTip("Draw a polygon to add/erase from mask")
-        self.polygon_select_button.clicked.connect(self.start_polygon_select)
-
-        self.finish_polygon_button = QPushButton("Finish Polygon")
-        self.finish_polygon_button.clicked.connect(self.finish_polygon_select)
-        self.finish_polygon_button.setVisible(False)
-        self.finish_polygon_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
-
-        self.reset_masks_button = QPushButton("Reset All")
-        self.reset_masks_button.setToolTip("Reset all masks to original state (in memory only)")
-        self.reset_masks_button.clicked.connect(self.reset_masks)
-
-        self.delete_masks_button = QPushButton("Delete File")
-        self.delete_masks_button.setToolTip("Delete the saved .masks.npz file from disk")
-        self.delete_masks_button.clicked.connect(self.delete_edited_masks)
-
-        mask_edit_layout.addWidget(self.edit_mode_checkbox)
-        mask_edit_layout.addWidget(self.paint_mode_label)
-        mask_edit_layout.addWidget(self.paint_radio)
-        mask_edit_layout.addWidget(self.erase_radio)
-        mask_edit_layout.addWidget(self.brush_size_label)
-        mask_edit_layout.addWidget(self.brush_size_slider)
-        mask_edit_layout.addWidget(self.brush_size_value_label)
-        mask_edit_layout.addWidget(self.selected_person_label)
-        mask_edit_layout.addWidget(self.finish_editing_button)
-        mask_edit_layout.addWidget(self.polygon_select_button)
-        mask_edit_layout.addWidget(self.finish_polygon_button)
-        mask_edit_layout.addStretch()
-        mask_edit_layout.addWidget(self.reset_masks_button)
-        mask_edit_layout.addWidget(self.delete_masks_button)
-
-        # Hide editing controls initially
-        self.paint_mode_label.hide()
-        self.paint_radio.hide()
-        self.erase_radio.hide()
-        self.brush_size_label.hide()
-        self.brush_size_slider.hide()
-        self.brush_size_value_label.hide()
-        self.selected_person_label.hide()
-        self.finish_editing_button.hide()
-        self.polygon_select_button.hide()
-        self.finish_polygon_button.hide()
-        self.reset_masks_button.hide()
-        self.delete_masks_button.hide()
-
-        self.mask_edit_container.hide()
-        layout.addWidget(self.mask_edit_container)
-
-        # Buttons
-        button_layout = QHBoxLayout()
-        self.reload_button = QPushButton("Reload")
-        self.reload_button.setToolTip("Reload saved detections and masks from disk")
-        self.reload_button.clicked.connect(self.reload_from_cache)
-        self.refresh_button = QPushButton("Re-detect")
-        self.refresh_button.setToolTip("Run fresh YOLO person detection and discard any edits")
-        self.refresh_button.clicked.connect(self.run_detection)
-        self.fit_button = QPushButton("Fit to View")
-        self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
-        # Show Crops button removed - card gallery already shows crops
-
-        # Quick toggle for split merged people (major performance impact)
-        self.split_merged_checkbox = QCheckBox("Split Merged People")
-        self.split_merged_checkbox.setToolTip(
-            "Automatically detect occluded/merged people using WD Tagger + iterative detection.\n"
-            "⚠️ Performance: ON = ~6s (automatic), OFF = ~0.4s (manual with Create Inverse)\n"
-            "Tip: For best speed, keep OFF and use 'Create Inverse' when needed."
-        )
-        # Initialize from settings
-        self.split_merged_checkbox.setChecked(self.detection_settings.get('split_merged_people', True))
-        self.split_merged_checkbox.stateChanged.connect(self.on_split_merged_changed)
-
-        self.add_person_button = QPushButton("Add Person")
-        self.add_person_button.clicked.connect(self.add_manual_person)
-        self.add_person_button.setEnabled(False)
-        self.add_person_button.setToolTip("Manually add a person by painting a mask")
-        self.split_by_line_button = QPushButton("Split by Line")
-        self.split_by_line_button.clicked.connect(self.start_split_by_line)
-        self.split_by_line_button.setEnabled(False)
-        self.split_by_line_button.setToolTip("Draw a multi-segment line to split image")
+        # Finish line button (for split by line mode, overlays on image)
         self.finish_line_button = QPushButton("Finish Line")
         self.finish_line_button.clicked.connect(self.finish_split_line)
         self.finish_line_button.setVisible(False)
-        self.finish_line_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; }")
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.close)
-        button_layout.addWidget(self.reload_button)
-        button_layout.addWidget(self.refresh_button)
-        button_layout.addWidget(self.fit_button)
-        button_layout.addWidget(self.split_merged_checkbox)
-        button_layout.addWidget(self.add_person_button)
-        button_layout.addWidget(self.split_by_line_button)
-        button_layout.addWidget(self.finish_line_button)
-        button_layout.addStretch()
-        button_layout.addWidget(self.close_button)
-        layout.addLayout(button_layout)
+        self.finish_line_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; }")
+        self.finish_line_button.setParent(content_area)
+        self.finish_line_button.move(10, 10)
+
+        # Track selected person
+        self.selected_card_index = None
+        self.person_cards = []  # List of PersonCard widgets
+        self.thumbnail_cache = {}  # Cache thumbnails: key = (index, bbox_tuple) -> QPixmap
 
         # Initialize editing state
         self.edit_mode_enabled = False
@@ -1294,65 +1419,14 @@ class DetectionPreviewDialog(QDialog):
 
         return img_copy, scale_factor
 
+    # Obsolete - properties now handled by PersonCard widgets
     def on_alias_changed(self):
-        """Handle alias text change in properties panel."""
-        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
-            return
-
-        new_alias = self.alias_input.text().strip()
-        self.current_detections[self.selected_card_index]['alias'] = new_alias
-
-        # Update only the specific card's label (not regenerating all cards)
-        if self.selected_card_index < len(self.person_cards):
-            card = self.person_cards[self.selected_card_index]
-            # Find the info label (second child in the card's layout)
-            card_layout = card.layout()
-            if card_layout and card_layout.count() >= 2:
-                info_label = card_layout.itemAt(1).widget()
-                if isinstance(info_label, QLabel):
-                    label_text = new_alias if new_alias else f"Person {self.selected_card_index + 1}"
-                    enabled = self.current_detections[self.selected_card_index].get('enabled', True)
-                    if not enabled:
-                        info_label.setText(f"{label_text}\n🚫 Disabled")
-                    else:
-                        info_label.setText(label_text)
-
-        # Save to sidecar
-        self.save_edited_masks()
-        logger.info(f"Person {self.selected_card_index + 1} alias set to: '{new_alias}'")
+        """Handle alias text change (obsolete - now handled by PersonCard)."""
+        pass
 
     def on_enabled_changed_panel(self, state):
-        """Handle enabled checkbox change in properties panel."""
-        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
-            return
-
-        enabled = (state == Qt.CheckState.Checked.value)
-        self.current_detections[self.selected_card_index]['enabled'] = enabled
-
-        # Update only the specific card's appearance
-        if self.selected_card_index < len(self.person_cards):
-            card = self.person_cards[self.selected_card_index]
-            card_layout = card.layout()
-            if card_layout and card_layout.count() >= 2:
-                info_label = card_layout.itemAt(1).widget()
-                if isinstance(info_label, QLabel):
-                    alias = self.current_detections[self.selected_card_index].get('alias', '')
-                    label_text = alias if alias else f"Person {self.selected_card_index + 1}"
-                    if not enabled:
-                        info_label.setText(f"{label_text}\n🚫 Disabled")
-                        info_label.setStyleSheet("color: #f44336; font-weight: bold;")
-                        card.setStyleSheet("QFrame { opacity: 0.5; border: 3px solid #2196F3; }")
-                    else:
-                        info_label.setText(label_text)
-                        info_label.setStyleSheet("font-weight: bold;")
-                        card.setStyleSheet("QFrame { border: 3px solid #2196F3; }")
-
-        # Update status footer
-        self.update_status_footer()
-
-        # Save to sidecar
-        self.save_edited_masks()
-        logger.info(f"Person {self.selected_card_index + 1} {'enabled' if enabled else 'disabled'}")
+        """Handle enabled checkbox change (obsolete - now handled by PersonCard)."""
+        pass
 
     def create_inverse_crop(self):
         """Create a new person from the inverse of the selected person."""
@@ -2551,19 +2625,21 @@ class DetectionPreviewDialog(QDialog):
             )
 
     def update_crop_cards(self, detections: list, from_cache: bool = False):
-        """Update the crop card gallery.
+        """Update the person card gallery with new PersonCard widgets.
 
         Args:
             detections: List of detection dictionaries
             from_cache: If True, preserve thumbnail cache. If False, clear it.
         """
+        import time
+        start_time = time.time()
+
         # Clear existing cards
         for card in self.person_cards:
             card.deleteLater()
         self.person_cards.clear()
 
         # Only clear thumbnail cache if running fresh detection
-        # When loading from cache, preserve thumbnails for faster display
         if not from_cache:
             logger.debug("Clearing thumbnail cache (fresh detection)")
             self.thumbnail_cache.clear()
@@ -2577,78 +2653,30 @@ class DetectionPreviewDialog(QDialog):
             if 'alias' not in detection:
                 detection['alias'] = ''
 
-        # Generate crop thumbnails and create cards
+        # Generate crop thumbnails and create PersonCard widgets
         for i, detection in enumerate(detections):
-            card = self._create_crop_card(i, detection)
-            self.person_cards.append(card)
-            self.cards_layout.addWidget(card)
+            thumb_start = time.time()
 
-        # Update status footer
-        self.update_status_footer()
+            # Create PersonCard widget
+            card = PersonCard(i, detection, self)
+            self.person_cards.append(card)
+            self.people_layout.addWidget(card)
+
+            # Generate and set thumbnail
+            try:
+                crop_pixmap = self._generate_crop_thumbnail(detection, index=i)
+                card.set_thumbnail(crop_pixmap)
+                logger.info(f"⏱️  Person {i+1}: generated thumbnail in {time.time() - thumb_start:.3f}s (mask={'yes' if detection.get('mask') is not None else 'no'})")
+            except Exception as e:
+                logger.error(f"Failed to generate thumbnail for person {i + 1}: {e}")
+
+        logger.info(f"⏱️  update_crop_cards took {time.time() - start_time:.3f}s")
+
+        # Update detection count label
+        self.detection_count_label.setText(f"PEOPLE ({len(detections)} found)")
 
         # Deselect any previously selected card
         self.selected_card_index = None
-        self.update_properties_panel()
-
-    def _create_crop_card(self, index: int, detection: dict) -> QWidget:
-        """Create a crop card widget for a person."""
-        card = QFrame()
-        card.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
-        card.setLineWidth(2)
-        card.setFixedSize(200, 250)
-        card.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        # Store index for click handling
-        card.person_index = index
-
-        # Card layout
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(5, 5, 5, 5)
-
-        # Thumbnail
-        thumbnail_label = QLabel()
-        thumbnail_label.setFixedSize(190, 190)
-        thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        thumbnail_label.setStyleSheet("border: 1px solid #ccc;")
-
-        # Generate thumbnail (with caching)
-        try:
-            crop_pixmap = self._generate_crop_thumbnail(detection, index=index)
-            thumbnail_label.setPixmap(crop_pixmap.scaled(
-                190, 190,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            ))
-        except Exception as e:
-            logger.error(f"Failed to generate thumbnail for person {index + 1}: {e}")
-            thumbnail_label.setText("Error")
-
-        card_layout.addWidget(thumbnail_label)
-
-        # Info overlay
-        info_label = QLabel()
-        alias = detection.get('alias', '')
-        label_text = alias if alias else f"Person {index + 1}"
-        enabled = detection.get('enabled', True)
-
-        if not enabled:
-            info_label.setText(f"{label_text}\n🚫 Disabled")
-            info_label.setStyleSheet("color: #f44336; font-weight: bold;")
-            card.setStyleSheet("QFrame { opacity: 0.5; }")
-        else:
-            info_label.setText(label_text)
-            info_label.setStyleSheet("font-weight: bold;")
-
-        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        card_layout.addWidget(info_label)
-
-        # Click handler
-        def on_card_clicked(event):
-            self.select_card(index)
-
-        card.mousePressEvent = on_card_clicked
-
-        return card
 
     def _generate_crop_thumbnail(self, detection: dict, index: int = None) -> QPixmap:
         """Generate a crop thumbnail for a detection (with caching)."""
@@ -2733,71 +2761,36 @@ class DetectionPreviewDialog(QDialog):
         return pixmap
 
     def select_card(self, index: int):
-        """Select a crop card."""
+        """Select a person card."""
         if index == self.selected_card_index:
             return  # Already selected
+
+        # Deselect previous card
+        if self.selected_card_index is not None and self.selected_card_index < len(self.person_cards):
+            self.person_cards[self.selected_card_index].set_selected(False)
 
         # Update selection
         self.selected_card_index = index
 
-        # Update card styles
-        for i, card in enumerate(self.person_cards):
-            if i == index:
-                card.setStyleSheet("QFrame { border: 3px solid #2196F3; }")
-            else:
-                card.setStyleSheet("")
+        # Select new card (PersonCard will handle visual updates and show/hide edit controls)
+        if index < len(self.person_cards):
+            self.person_cards[index].set_selected(True)
 
-        # Update properties panel
-        self.update_properties_panel()
+        # Highlight selected person on image
+        self.highlighted_person = index
+        self.redraw_with_highlight()
 
         # Update mode banner
         self.update_mode_banner()
 
-        # Highlight in image
-        self.highlighted_person = index
-        self.redraw_with_highlight()
-
+    # Obsolete - properties now in PersonCard widgets
     def update_properties_panel(self):
-        """Update the properties panel based on selected card."""
-        if self.selected_card_index is None or self.selected_card_index >= len(self.current_detections):
-            self.alias_input.setEnabled(False)
-            self.enabled_checkbox_panel.setEnabled(False)
-            self.inverse_button.setEnabled(False)
-            self.delete_person_button.setEnabled(False)
-            self.alias_input.clear()
-            return
-
-        detection = self.current_detections[self.selected_card_index]
-
-        self.alias_input.setEnabled(True)
-        self.enabled_checkbox_panel.setEnabled(True)
-        self.inverse_button.setEnabled(True)
-        self.delete_person_button.setEnabled(True)
-
-        # Block signals to avoid recursive updates
-        self.alias_input.blockSignals(True)
-        self.enabled_checkbox_panel.blockSignals(True)
-
-        self.alias_input.setText(detection.get('alias', ''))
-        self.enabled_checkbox_panel.setChecked(detection.get('enabled', True))
-
-        self.alias_input.blockSignals(False)
-        self.enabled_checkbox_panel.blockSignals(False)
+        """Update the properties panel (obsolete - now in PersonCard)."""
+        pass
 
     def update_status_footer(self):
-        """Update the status footer with counts."""
-        if not self.current_detections:
-            self.status_footer.setText("")
-            return
-
-        total = len(self.current_detections)
-        enabled = sum(1 for d in self.current_detections if d.get('enabled', True))
-        disabled = total - enabled
-
-        if disabled > 0:
-            self.status_footer.setText(f"📊 {enabled} enabled, {disabled} disabled ({total} total)")
-        else:
-            self.status_footer.setText(f"📊 {total} {'person' if total == 1 else 'people'} - all enabled")
+        """Update the status footer (obsolete - count now in detection_count_label)."""
+        pass
 
     def update_mode_banner(self):
         """Update the mode banner based on current state."""
