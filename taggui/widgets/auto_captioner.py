@@ -518,7 +518,7 @@ class DetectionPreviewDialog(QDialog):
         tools_layout.addWidget(self.split_by_line_button)
 
         self.fit_button = QPushButton("Fit to View")
-        self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
+        # Connection deferred until graphics_view is created
         tools_layout.addWidget(self.fit_button)
 
         sidebar_layout.addWidget(tools_group)
@@ -568,6 +568,9 @@ class DetectionPreviewDialog(QDialog):
         self.graphics_view.setMinimumHeight(500)
         self.graphics_view.setMinimumWidth(600)
         content_layout.addWidget(self.graphics_view)
+
+        # Now that graphics_view exists, connect fit button
+        self.fit_button.clicked.connect(self.graphics_view.reset_zoom)
 
         # Zoom info
         self.zoom_label = QLabel("Mouse wheel: zoom • Drag: pan")
