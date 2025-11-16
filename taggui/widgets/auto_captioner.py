@@ -594,8 +594,8 @@ class DetectionPreviewDialog(QDialog):
         self.thumbnail_cache = {}  # Cache thumbnails: key = (index, bbox_tuple) -> QPixmap
 
         # Initialize editing state
-        self.edit_mode_enabled = False
-        self.brush_mode = 'paint'  # 'paint' or 'erase'
+        self.edit_mode_enabled = True  # Always enabled, controlled per-card now
+        self.brush_mode = 'paint'  # 'paint' or 'erase' - set by selected PersonCard
         self.original_detections = None  # Backup of original masks
         self.is_painting = False
         self.current_display_scale = 1.0  # Scale factor for displayed image vs source
@@ -675,23 +675,13 @@ class DetectionPreviewDialog(QDialog):
         # Clear previous results
         self.graphics_scene.clear()
 
-        # Clear previous crop cards
+        # Clear previous person cards
         for card in self.person_cards:
             card.deleteLater()
         self.person_cards.clear()
 
-        # Clear previous crop previews
-        while self.crop_previews_layout.count():
-            item = self.crop_previews_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
         # Reset selection
         self.selected_card_index = None
-
-        # Hide edit mode if it was enabled
-        self.edit_mode_checkbox.setChecked(False)
-        self.toggle_edit_mode()
 
         # Reset mode banner
         self.update_mode_banner()
@@ -1693,55 +1683,13 @@ class DetectionPreviewDialog(QDialog):
             self.loading_label.hide()
 
     def toggle_edit_mode(self):
-        """Toggle mask editing mode."""
-        self.edit_mode_enabled = self.edit_mode_checkbox.isChecked()
-
-        if self.edit_mode_enabled:
-            # Show editing controls
-            self.paint_mode_label.show()
-            self.paint_radio.show()
-            self.erase_radio.show()
-            self.brush_size_label.show()
-            self.brush_size_slider.show()
-            self.brush_size_value_label.show()
-            self.selected_person_label.show()
-            self.finish_editing_button.show()
-            self.polygon_select_button.show()
-            self.reset_masks_button.show()
-
-            # Backup original masks
-            if self.original_detections is None:
-                import copy
-                self.original_detections = copy.deepcopy(self.current_detections)
-
-            # Update selected person label
-            if self.highlighted_person is not None:
-                self.selected_person_label.setText(f"Editing: Person {self.highlighted_person + 1}")
-            else:
-                self.selected_person_label.setText("Select a person from the card gallery")
-
-            # Enable painting on graphics view
-            self.graphics_view.edit_mode_enabled = True
-            self.graphics_view.detection_dialog = self
-            # Disable panning to allow painting
-            self.graphics_view.setDragMode(QGraphicsView.DragMode.NoDrag)
-        else:
-            # Hide editing controls
-            self.paint_mode_label.hide()
-            self.paint_radio.hide()
-            self.erase_radio.hide()
-            self.brush_size_label.hide()
-            self.brush_size_slider.hide()
-            self.brush_size_value_label.hide()
-            self.selected_person_label.hide()
-            self.finish_editing_button.hide()
-            self.polygon_select_button.hide()
-            self.finish_polygon_button.hide()
-            self.reset_masks_button.hide()
-
-            # Disable painting and restore panning
-            self.graphics_view.edit_mode_enabled = False
-            self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        """Toggle mask editing mode (obsolete - editing always enabled, controlled per PersonCard)."""
+        # Edit mode is now always enabled and controlled by individual PersonCard widgets
+        # Painting is enabled when a person is selected
+        self.graphics_view.edit_mode_enabled = True
+        self.graphics_view.detection_dialog = self
+        # Keep panning disabled when editing (painting takes priority)
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.NoDrag)
 
     def finish_editing_person(self):
         """Finish editing the current person - save and update thumbnail."""
@@ -2928,131 +2876,10 @@ class DetectionPreviewDialog(QDialog):
                 logger.info(f"Person {row + 1} alias set to: '{new_alias}'")
 
     def show_crop_previews(self):
-        """Generate and display crop previews showing what WD Tagger will see."""
-        if not self.current_detections or not self.current_image:
-            return
-
-        # Clear existing previews
-        while self.crop_previews_layout.count():
-            item = self.crop_previews_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        # Show loading indicator
-        self.loading_label.setText("⏳ Generating crop previews...")
-        self.loading_label.show()
-        self.show_crops_button.setEnabled(False)
-        QApplication.processEvents()
-
-        try:
-            from auto_captioning.models.multi_person_tagger import MultiPersonTagger
-
-            # Get masking settings
-            mask_overlapping = self.detection_settings.get('mask_overlapping_people', True)
-            masking_method = self.detection_settings.get('masking_method', 'Bounding box')
-            preserve_target_bbox = self.detection_settings.get('preserve_target_bbox', True)
-            padding = self.detection_settings.get('crop_padding', 10)
-
-            # Mask refinement settings
-            mask_erosion = self.detection_settings.get('mask_erosion_size', 0)
-            mask_dilation = self.detection_settings.get('mask_dilation_size', 0)
-            mask_blur = self.detection_settings.get('mask_blur_size', 0)
-
-            # Generate crops for each person (skip disabled ones)
-            for i, detection in enumerate(self.current_detections):
-                # Skip if person is disabled
-                if not detection.get('enabled', True):
-                    continue
-
-                # Extract person using segmentation or bbox+masking
-                if masking_method == 'Segmentation' and detection.get('mask') is not None:
-                    # Extract ONLY the segmented person on white background
-                    cropped = self._extract_segmented_person(
-                        self.current_image,
-                        detection,
-                        padding
-                    )
-                elif mask_overlapping and len(self.current_detections) > 1:
-                    # Use bounding box masking (mask out other people, then crop)
-                    image_to_crop = self._generate_masked_image(
-                        self.current_image,
-                        detection,
-                        i,
-                        self.current_detections,
-                        padding,
-                        masking_method,
-                        preserve_target_bbox,
-                        mask_erosion,
-                        mask_dilation,
-                        mask_blur
-                    )
-                    # Crop the person
-                    bbox = detection['bbox']
-                    x1, y1, x2, y2 = bbox
-                    crop_x1 = max(0, x1 - padding)
-                    crop_y1 = max(0, y1 - padding)
-                    crop_x2 = min(image_to_crop.width, x2 + padding)
-                    crop_y2 = min(image_to_crop.height, y2 + padding)
-                    cropped = image_to_crop.crop((crop_x1, crop_y1, crop_x2, crop_y2))
-                else:
-                    # No masking - just crop the bounding box
-                    bbox = detection['bbox']
-                    x1, y1, x2, y2 = bbox
-                    crop_x1 = max(0, x1 - padding)
-                    crop_y1 = max(0, y1 - padding)
-                    crop_x2 = min(self.current_image.width, x2 + padding)
-                    crop_y2 = min(self.current_image.height, y2 + padding)
-                    cropped = self.current_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
-
-                # Convert to QPixmap and display
-                # Scale to max 150px height for preview
-                max_height = 150
-                if cropped.height > max_height:
-                    aspect = cropped.width / cropped.height
-                    new_height = max_height
-                    new_width = int(aspect * new_height)
-                    cropped = cropped.resize((new_width, new_height), PilImage.Resampling.LANCZOS)
-
-                # Convert to QPixmap
-                buffer = BytesIO()
-                cropped.save(buffer, format='PNG')
-                buffer.seek(0)
-                qimage = QImage.fromData(buffer.getvalue())
-                pixmap = QPixmap.fromImage(qimage)
-
-                # Create label with image
-                crop_widget = QWidget()
-                crop_layout = QVBoxLayout(crop_widget)
-                crop_layout.setContentsMargins(5, 5, 5, 5)
-
-                image_label = QLabel()
-                image_label.setPixmap(pixmap)
-                image_label.setFrameStyle(QFrame.Shape.Box)
-
-                text_label = QLabel(f"Person {i+1}")
-                text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                text_label.setStyleSheet("font-weight: bold;")
-
-                crop_layout.addWidget(image_label)
-                crop_layout.addWidget(text_label)
-
-                self.crop_previews_layout.addWidget(crop_widget)
-
-            # Show the previews
-            self.crop_previews_label.show()
-            self.crop_previews_scroll.show()
-
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Crop Preview Error",
-                f"Failed to generate crop previews: {str(e)}"
-            )
-
-        finally:
-            # Hide loading indicator and re-enable button
-            self.loading_label.hide()
-            self.show_crops_button.setEnabled(True)
+        """Generate and display crop previews (obsolete - previews now in PersonCard thumbnails)."""
+        # Crop previews are now automatically shown as thumbnails in each PersonCard
+        # This method is kept for backwards compatibility
+        pass
 
     def _generate_masked_image(
         self,
