@@ -239,13 +239,44 @@ class PersonCard(QWidget):
 
         # Action buttons
         action_layout = QHBoxLayout()
-        self.inverse_button = QPushButton("Inverse")
+        self.inverse_button = QPushButton("↔️ Inverse")
         self.inverse_button.setToolTip("Create new person from everything except this")
+        self.inverse_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e3f2fd;
+                color: #1976D2;
+                border: 1px solid #90CAF9;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #BBDEFB;
+            }
+            QPushButton:pressed {
+                background-color: #90CAF9;
+            }
+        """)
         self.inverse_button.clicked.connect(self.on_inverse_clicked)
         action_layout.addWidget(self.inverse_button)
 
-        self.delete_button = QPushButton("Delete")
-        self.delete_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
+        self.delete_button = QPushButton("🗑️ Delete")
+        self.delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: 1px solid #d32f2f;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e53935;
+            }
+            QPushButton:pressed {
+                background-color: #c62828;
+            }
+        """)
         self.delete_button.clicked.connect(self.on_delete_clicked)
         action_layout.addWidget(self.delete_button)
         layout.addLayout(action_layout)
@@ -263,14 +294,54 @@ class PersonCard(QWidget):
 
         # Paint/Erase mode
         mode_layout = QHBoxLayout()
-        self.paint_radio = QPushButton("Paint")
+        self.paint_radio = QPushButton("🖌️ Paint")
         self.paint_radio.setCheckable(True)
         self.paint_radio.setChecked(True)
+        self.paint_radio.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #2196F3;
+                color: white;
+                border: 2px solid #1976D2;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+            }
+            QPushButton:checked:hover {
+                background-color: #1E88E5;
+            }
+        """)
         self.paint_radio.clicked.connect(lambda: self.set_brush_mode('paint'))
         mode_layout.addWidget(self.paint_radio)
 
-        self.erase_radio = QPushButton("Erase")
+        self.erase_radio = QPushButton("🧹 Erase")
         self.erase_radio.setCheckable(True)
+        self.erase_radio.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 2px solid #ccc;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #FF9800;
+                color: white;
+                border: 2px solid #F57C00;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+            }
+            QPushButton:checked:hover {
+                background-color: #FB8C00;
+            }
+        """)
         self.erase_radio.clicked.connect(lambda: self.set_brush_mode('erase'))
         mode_layout.addWidget(self.erase_radio)
         edit_layout.addLayout(mode_layout)
@@ -290,13 +361,45 @@ class PersonCard(QWidget):
 
         # Edit tools
         tools_layout = QHBoxLayout()
-        self.polygon_button = QPushButton("Polygon")
+        self.polygon_button = QPushButton("⬡ Polygon")
         self.polygon_button.setToolTip("Draw polygon to add/erase")
+        self.polygon_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                color: #333;
+                border: 1px solid #ccc;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+                border: 1px solid #999;
+            }
+            QPushButton:pressed {
+                background-color: #d0d0d0;
+            }
+        """)
         self.polygon_button.clicked.connect(self.on_polygon_clicked)
         tools_layout.addWidget(self.polygon_button)
 
         self.finish_button = QPushButton("✓ Finish")
-        self.finish_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        self.finish_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: 1px solid #388E3C;
+                padding: 6px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #45A049;
+            }
+            QPushButton:pressed {
+                background-color: #388E3C;
+            }
+        """)
         self.finish_button.clicked.connect(self.on_finish_editing)
         tools_layout.addWidget(self.finish_button)
         edit_layout.addLayout(tools_layout)
