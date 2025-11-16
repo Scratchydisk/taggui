@@ -914,6 +914,37 @@ class CaptionSettingsForm(QVBoxLayout):
                                           self.mp_min_probability_spin_box)
         advanced_mp_settings_form.addRow(mp_tags_to_exclude_form)
 
+        # Experimental settings section
+        advanced_mp_settings_form.addRow(HorizontalLine())
+        experimental_label = QLabel('Experimental Mask Refinement')
+        experimental_label.setStyleSheet('font-weight: bold; color: #ff8800;')
+        advanced_mp_settings_form.addRow(experimental_label)
+
+        self.mask_erosion_spin_box = FocusedScrollSettingsSpinBox(
+            key='mask_erosion_size', default=0, minimum=0, maximum=50)
+        self.mask_erosion_spin_box.setToolTip(
+            'Shrink masks by N pixels before masking other people.\n'
+            'Prevents mask bleeding in overlapping regions. Try 3-10 pixels.')
+
+        self.mask_dilation_spin_box = FocusedScrollSettingsSpinBox(
+            key='mask_dilation_size', default=0, minimum=0, maximum=50)
+        self.mask_dilation_spin_box.setToolTip(
+            'Expand masks by N pixels before masking other people.\n'
+            'Increases masking coverage. Use if tags from other people leak through.')
+
+        self.mask_blur_spin_box = FocusedScrollSettingsSpinBox(
+            key='mask_blur_size', default=0, minimum=0, maximum=50)
+        self.mask_blur_spin_box.setToolTip(
+            'Apply Gaussian blur to mask edges (kernel size).\n'
+            'Softens mask boundaries. Must be odd number (will be adjusted).')
+
+        advanced_mp_settings_form.addRow('Mask erosion (px)',
+                                          self.mask_erosion_spin_box)
+        advanced_mp_settings_form.addRow('Mask dilation (px)',
+                                          self.mask_dilation_spin_box)
+        advanced_mp_settings_form.addRow('Mask blur (px)',
+                                          self.mask_blur_spin_box)
+
         # Hide advanced settings by default
         self.advanced_mp_settings_container.hide()
 
@@ -1166,7 +1197,11 @@ class CaptionSettingsForm(QVBoxLayout):
             'wd_model': self.wd_model_combo_box.currentText(),
             'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
             'mp_wd_tagger_tags_to_exclude':
-                self.mp_tags_to_exclude_text_edit.toPlainText()
+                self.mp_tags_to_exclude_text_edit.toPlainText(),
+            # Experimental mask refinement
+            'mask_erosion_size': self.mask_erosion_spin_box.value(),
+            'mask_dilation_size': self.mask_dilation_spin_box.value(),
+            'mask_blur_size': self.mask_blur_spin_box.value()
         }
 
     def show_detection_preview(self):

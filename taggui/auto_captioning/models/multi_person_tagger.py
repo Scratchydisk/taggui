@@ -54,6 +54,11 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.max_scene_tags = caption_settings.get('max_scene_tags', 20)
         self.max_tags_per_person = caption_settings.get('max_tags_per_person', 50)
 
+        # Experimental mask refinement parameters
+        self.mask_erosion_size = caption_settings.get('mask_erosion_size', 0)
+        self.mask_dilation_size = caption_settings.get('mask_dilation_size', 0)
+        self.mask_blur_size = caption_settings.get('mask_blur_size', 0)
+
         # Parse person aliases (comma-separated)
         person_aliases_str = caption_settings.get('person_aliases', '').strip()
         if person_aliases_str:
@@ -292,6 +297,49 @@ class MultiPersonTagger(AutoCaptioningModel):
         pil_image = self.load_image(image)
         return pil_image
 
+    def _refine_mask(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Apply morphological operations and blur to refine mask.
+
+        Args:
+            mask: Boolean mask array (HxW)
+
+        Returns:
+            Refined boolean mask
+        """
+        if self.mask_erosion_size == 0 and self.mask_dilation_size == 0 and self.mask_blur_size == 0:
+            # No refinement needed
+            return mask
+
+        import cv2
+
+        # Convert to uint8 for OpenCV operations
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+
+        # Apply erosion (shrink mask)
+        if self.mask_erosion_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.mask_erosion_size, self.mask_erosion_size))
+            mask_uint8 = cv2.erode(mask_uint8, kernel, iterations=1)
+            logger.debug(f"Applied mask erosion: {self.mask_erosion_size}px")
+
+        # Apply dilation (expand mask)
+        if self.mask_dilation_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (self.mask_dilation_size, self.mask_dilation_size))
+            mask_uint8 = cv2.dilate(mask_uint8, kernel, iterations=1)
+            logger.debug(f"Applied mask dilation: {self.mask_dilation_size}px")
+
+        # Apply Gaussian blur
+        if self.mask_blur_size > 0:
+            # Ensure kernel size is odd
+            kernel_size = self.mask_blur_size if self.mask_blur_size % 2 == 1 else self.mask_blur_size + 1
+            mask_uint8 = cv2.GaussianBlur(mask_uint8, (kernel_size, kernel_size), 0)
+            logger.debug(f"Applied mask blur: {kernel_size}px kernel")
+
+        # Convert back to boolean
+        refined_mask = mask_uint8 > 127
+
+        return refined_mask
+
     def _preprocess_image_for_wd_tagger(self, pil_image: PilImage.Image) -> np.ndarray:
         """
         Preprocess PIL image for WD Tagger (same as wd_tagger.py).
@@ -469,6 +517,9 @@ class MultiPersonTagger(AutoCaptioningModel):
             if mask.shape[0] != height or mask.shape[1] != width:
                 logger.warning(f"Mask shape {mask.shape} doesn't match image shape ({height}, {width})")
                 continue
+
+            # Apply mask refinement (erosion, dilation, blur)
+            mask = self._refine_mask(mask)
 
             # Only mask the pixels that belong to this person AND overlap with the crop region
             # Create a mask for the crop region
