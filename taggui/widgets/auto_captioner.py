@@ -720,10 +720,16 @@ class DetectionPreviewDialog(QDialog):
 
             # Generate crops for each person
             for i, detection in enumerate(self.current_detections):
-                # Apply masking if enabled
-                image_to_crop = self.current_image
-                if mask_overlapping and len(self.current_detections) > 1:
-                    # Apply the same masking logic as the tagger
+                # Extract person using segmentation or bbox+masking
+                if masking_method == 'Segmentation' and detection.get('mask') is not None:
+                    # Extract ONLY the segmented person on white background
+                    cropped = self._extract_segmented_person(
+                        self.current_image,
+                        detection,
+                        padding
+                    )
+                elif mask_overlapping and len(self.current_detections) > 1:
+                    # Use bounding box masking (mask out other people, then crop)
                     image_to_crop = self._generate_masked_image(
                         self.current_image,
                         detection,
@@ -736,16 +742,23 @@ class DetectionPreviewDialog(QDialog):
                         mask_dilation,
                         mask_blur
                     )
-
-                # Crop the person
-                bbox = detection['bbox']
-                x1, y1, x2, y2 = bbox
-                crop_x1 = max(0, x1 - padding)
-                crop_y1 = max(0, y1 - padding)
-                crop_x2 = min(image_to_crop.width, x2 + padding)
-                crop_y2 = min(image_to_crop.height, y2 + padding)
-
-                cropped = image_to_crop.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                    # Crop the person
+                    bbox = detection['bbox']
+                    x1, y1, x2, y2 = bbox
+                    crop_x1 = max(0, x1 - padding)
+                    crop_y1 = max(0, y1 - padding)
+                    crop_x2 = min(image_to_crop.width, x2 + padding)
+                    crop_y2 = min(image_to_crop.height, y2 + padding)
+                    cropped = image_to_crop.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                else:
+                    # No masking - just crop the bounding box
+                    bbox = detection['bbox']
+                    x1, y1, x2, y2 = bbox
+                    crop_x1 = max(0, x1 - padding)
+                    crop_y1 = max(0, y1 - padding)
+                    crop_x2 = min(self.current_image.width, x2 + padding)
+                    crop_y2 = min(self.current_image.height, y2 + padding)
+                    cropped = self.current_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
                 # Convert to QPixmap and display
                 # Scale to max 150px height for preview
@@ -874,6 +887,70 @@ class DetectionPreviewDialog(QDialog):
                     img_array[overlap_y1:overlap_y2, overlap_x1:overlap_x2] = grey_value
 
         return PilImage.fromarray(img_array)
+
+    def _extract_segmented_person(
+        self,
+        image: PilImage.Image,
+        detection: dict,
+        padding: int
+    ) -> PilImage.Image:
+        """Extract only the segmented person pixels on a white background."""
+        mask = detection.get('mask')
+        if mask is None:
+            # Fall back to regular bbox crop if no mask
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+            crop_x1 = max(0, x1 - padding)
+            crop_y1 = max(0, y1 - padding)
+            crop_x2 = min(image.width, x2 + padding)
+            crop_y2 = min(image.height, y2 + padding)
+            return image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+        # Get image dimensions
+        width, height = image.size
+
+        # Convert image to numpy array
+        img_array = np.array(image)
+
+        # Create white background
+        num_channels = img_array.shape[2] if len(img_array.shape) == 3 else 1
+        white_value = [255] * num_channels if num_channels > 1 else 255
+        result_array = np.full_like(img_array, white_value)
+
+        # Copy only the pixels where the mask is True
+        result_array[mask] = img_array[mask]
+
+        # Convert back to PIL Image
+        result_image = PilImage.fromarray(result_array)
+
+        # Find the bounding box of the mask
+        mask_coords = np.argwhere(mask)
+        if len(mask_coords) == 0:
+            # Empty mask - fall back to bbox
+            bbox = detection['bbox']
+            x1, y1, x2, y2 = bbox
+            crop_x1 = max(0, x1 - padding)
+            crop_y1 = max(0, y1 - padding)
+            crop_x2 = min(width, x2 + padding)
+            crop_y2 = min(height, y2 + padding)
+            return result_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+        # mask_coords is in (y, x) format
+        y_coords = mask_coords[:, 0]
+        x_coords = mask_coords[:, 1]
+
+        # Get tight bounds
+        y_min, y_max = y_coords.min(), y_coords.max()
+        x_min, x_max = x_coords.min(), x_coords.max()
+
+        # Add padding
+        crop_x1 = max(0, x_min - padding)
+        crop_y1 = max(0, y_min - padding)
+        crop_x2 = min(width, x_max + padding + 1)
+        crop_y2 = min(height, y_max + padding + 1)
+
+        # Crop to the padded bounds
+        return result_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
     def _apply_mask_refinement(
         self,
@@ -1046,16 +1123,18 @@ class CaptionSettingsForm(QVBoxLayout):
         self.masking_method_combo_box = FocusedScrollSettingsComboBox(
             key='masking_method')
         self.masking_method_combo_box.addItems(['Bounding box', 'Segmentation'])
-        self.masking_method_combo_box.setCurrentText('Bounding box')
+        self.masking_method_combo_box.setCurrentText('Segmentation')
         self.masking_method_combo_box.setToolTip(
-            'Bounding box: Fast, rectangular masks. Segmentation: Precise pixel-level masks (slower)')
+            'Bounding box: Masks out other people using rectangles, then crops.\n'
+            'Segmentation: Extracts ONLY the target person\'s pixels on white background.\n'
+            'Segmentation is best for overlapping people - prevents tag contamination.')
 
         self.preserve_target_bbox_check_box = SettingsBigCheckBox(
             key='preserve_target_bbox', default=True)
         self.preserve_target_bbox_check_box.setToolTip(
-            'When using segmentation: preserve the full bounding box area for the target person\n'
-            '(includes shoes and accessories). Only mask overlapping people with segmentation.\n'
-            'Disable for strict person-only segmentation (may cut off shoes).')
+            'Only applies to Bounding box masking method.\n'
+            'Preserves the full bounding box area for the target person when masking others.\n'
+            'Not used with Segmentation method (which extracts only target pixels).')
 
         self.include_scene_tags_check_box = SettingsBigCheckBox(
             key='include_scene_tags', default=True)

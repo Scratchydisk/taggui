@@ -379,6 +379,84 @@ class MultiPersonTagger(AutoCaptioningModel):
 
         return image_array
 
+    def _extract_segmented_person(
+        self,
+        image: PilImage.Image,
+        detection: dict,
+        padding: int = 10
+    ) -> PilImage.Image:
+        """
+        Extract only the segmented person pixels on a white background.
+
+        This is the cleanest approach for overlapping people - we extract ONLY
+        the pixels that belong to the target person (using their segmentation mask)
+        and place them on a white background. No masking of other people needed.
+
+        Args:
+            image: Original PIL Image
+            detection: Detection dict with 'mask' and 'bbox' keys
+            padding: Padding around the person in pixels
+
+        Returns:
+            PIL Image with only the target person on white background
+        """
+        import numpy as np
+
+        mask = detection.get('mask')
+        if mask is None:
+            # Fall back to regular bbox crop if no mask
+            logger.warning("No segmentation mask available, falling back to bbox crop")
+            return self.person_detector.crop_person(image, detection['bbox'], padding)
+
+        # Get image dimensions
+        width, height = image.size
+
+        # Convert image to numpy array
+        img_array = np.array(image)
+
+        # Create white background (same size as image)
+        num_channels = img_array.shape[2] if len(img_array.shape) == 3 else 1
+        white_value = [255] * num_channels if num_channels > 1 else 255
+        result_array = np.full_like(img_array, white_value)
+
+        # Copy only the pixels where the mask is True
+        result_array[mask] = img_array[mask]
+
+        # Convert back to PIL Image
+        result_image = PilImage.fromarray(result_array)
+
+        # Find the bounding box of the mask (to crop tightly)
+        # Get mask coordinates where mask is True
+        mask_coords = np.argwhere(mask)
+        if len(mask_coords) == 0:
+            # Empty mask - fall back to bbox
+            logger.warning("Empty segmentation mask, falling back to bbox crop")
+            return self.person_detector.crop_person(image, detection['bbox'], padding)
+
+        # mask_coords is in (y, x) format
+        y_coords = mask_coords[:, 0]
+        x_coords = mask_coords[:, 1]
+
+        # Get tight bounds
+        y_min, y_max = y_coords.min(), y_coords.max()
+        x_min, x_max = x_coords.min(), x_coords.max()
+
+        # Add padding
+        crop_x1 = max(0, x_min - padding)
+        crop_y1 = max(0, y_min - padding)
+        crop_x2 = min(width, x_max + padding + 1)  # +1 because max is inclusive
+        crop_y2 = min(height, y_max + padding + 1)
+
+        # Crop to the padded bounds
+        cropped = result_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+        logger.debug(
+            f"Extracted segmented person: mask_bounds=({x_min},{y_min},{x_max},{y_max}), "
+            f"crop=({crop_x1},{crop_y1},{crop_x2},{crop_y2})"
+        )
+
+        return cropped
+
     def _mask_overlapping_bboxes(
         self,
         image: PilImage.Image,
@@ -644,34 +722,36 @@ class MultiPersonTagger(AutoCaptioningModel):
             person_tags_list = []
             for i, detection in enumerate(detections):
                 try:
-                    # Apply masking if enabled
-                    image_to_crop = pil_image
-                    if self.mask_overlapping_people and len(detections) > 1:
-                        if self.masking_method == 'Bounding box':
-                            # Mask other people with bounding boxes
-                            image_to_crop = self._mask_overlapping_bboxes(
-                                pil_image,
-                                detection['bbox'],
-                                detections,
-                                i,
-                                self.crop_padding
-                            )
-                        elif self.masking_method == 'Segmentation':
-                            # Mask other people with segmentation masks
-                            image_to_crop = self._mask_overlapping_segmentation(
-                                pil_image,
-                                detection['bbox'],
-                                detections,
-                                i,
-                                self.crop_padding
-                            )
-
-                    # Crop person
-                    cropped = self.person_detector.crop_person(
-                        image_to_crop,
-                        detection['bbox'],
-                        padding=self.crop_padding
-                    )
+                    # Extract person using segmentation or bbox+masking
+                    if self.masking_method == 'Segmentation' and detection.get('mask') is not None:
+                        # Extract ONLY the segmented person on white background
+                        cropped = self._extract_segmented_person(
+                            pil_image,
+                            detection,
+                            padding=self.crop_padding
+                        )
+                    elif self.mask_overlapping_people and len(detections) > 1:
+                        # Use bounding box masking (mask out other people, then crop)
+                        image_to_crop = self._mask_overlapping_bboxes(
+                            pil_image,
+                            detection['bbox'],
+                            detections,
+                            i,
+                            self.crop_padding
+                        )
+                        # Crop person
+                        cropped = self.person_detector.crop_person(
+                            image_to_crop,
+                            detection['bbox'],
+                            padding=self.crop_padding
+                        )
+                    else:
+                        # No masking - just crop the bounding box
+                        cropped = self.person_detector.crop_person(
+                            pil_image,
+                            detection['bbox'],
+                            padding=self.crop_padding
+                        )
 
                     # Preprocess crop for WD Tagger
                     crop_array = self._preprocess_image_for_wd_tagger(cropped)
