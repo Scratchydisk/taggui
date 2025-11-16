@@ -66,6 +66,9 @@ class ZoomableGraphicsView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self._zoom = 0
         self._zoom_factor = 1.15
+        self.edit_mode_enabled = False
+        self.detection_dialog = None
+        self.is_painting = False
 
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zooming."""
@@ -100,6 +103,50 @@ class ZoomableGraphicsView(QGraphicsView):
         super().showEvent(event)
         if self.scene() and not self.scene().sceneRect().isEmpty():
             self.fitInView(self.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def mousePressEvent(self, event):
+        """Handle mouse press for painting."""
+        if self.edit_mode_enabled and self.detection_dialog and event.button() == Qt.MouseButton.LeftButton:
+            # Start painting
+            self.is_painting = True
+            # Convert view coordinates to scene coordinates
+            scene_pos = self.mapToScene(event.pos())
+            self.paint_at_position(scene_pos)
+        else:
+            # Default behavior (panning)
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for painting."""
+        if self.edit_mode_enabled and self.detection_dialog and self.is_painting:
+            # Continue painting
+            scene_pos = self.mapToScene(event.pos())
+            self.paint_at_position(scene_pos)
+        else:
+            # Default behavior (panning)
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release."""
+        if self.is_painting:
+            self.is_painting = False
+        super().mouseReleaseEvent(event)
+
+    def paint_at_position(self, scene_pos):
+        """Paint at the given scene position."""
+        if not self.detection_dialog:
+            return
+
+        # Convert scene coordinates to image coordinates
+        # Scene coordinates are in pixels relative to the displayed image
+        x = int(scene_pos.x())
+        y = int(scene_pos.y())
+
+        # Get brush size from dialog
+        brush_size = self.detection_dialog.brush_size_slider.value()
+
+        # Paint on the mask
+        self.detection_dialog.paint_mask_at(x, y, brush_size)
 
 
 class DetectionPreviewDialog(QDialog):
@@ -204,6 +251,68 @@ class DetectionPreviewDialog(QDialog):
         self.crop_previews_scroll.setWidget(self.crop_previews_container)
         layout.addWidget(self.crop_previews_scroll)
 
+        # Mask editing controls (initially hidden)
+        self.mask_edit_container = QWidget()
+        mask_edit_layout = QHBoxLayout(self.mask_edit_container)
+        mask_edit_layout.setContentsMargins(0, 5, 0, 5)
+
+        self.edit_mode_checkbox = QPushButton("Edit Masks")
+        self.edit_mode_checkbox.setCheckable(True)
+        self.edit_mode_checkbox.setToolTip("Enable mask editing mode to paint/erase masks")
+        self.edit_mode_checkbox.clicked.connect(self.toggle_edit_mode)
+
+        self.paint_mode_label = QLabel("Mode:")
+        self.paint_radio = QPushButton("Paint")
+        self.paint_radio.setCheckable(True)
+        self.paint_radio.setChecked(True)
+        self.erase_radio = QPushButton("Erase")
+        self.erase_radio.setCheckable(True)
+
+        # Make paint/erase mutually exclusive
+        self.paint_radio.clicked.connect(lambda: self.set_brush_mode('paint'))
+        self.erase_radio.clicked.connect(lambda: self.set_brush_mode('erase'))
+
+        self.brush_size_label = QLabel("Brush size:")
+        self.brush_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.brush_size_slider.setMinimum(5)
+        self.brush_size_slider.setMaximum(100)
+        self.brush_size_slider.setValue(20)
+        self.brush_size_slider.setMaximumWidth(150)
+        self.brush_size_value_label = QLabel("20px")
+        self.brush_size_slider.valueChanged.connect(
+            lambda v: self.brush_size_value_label.setText(f"{v}px"))
+
+        self.selected_person_label = QLabel("No person selected")
+        self.selected_person_label.setStyleSheet("font-weight: bold; color: #0066cc;")
+
+        self.reset_masks_button = QPushButton("Reset All")
+        self.reset_masks_button.setToolTip("Reset all masks to original state")
+        self.reset_masks_button.clicked.connect(self.reset_masks)
+
+        mask_edit_layout.addWidget(self.edit_mode_checkbox)
+        mask_edit_layout.addWidget(self.paint_mode_label)
+        mask_edit_layout.addWidget(self.paint_radio)
+        mask_edit_layout.addWidget(self.erase_radio)
+        mask_edit_layout.addWidget(self.brush_size_label)
+        mask_edit_layout.addWidget(self.brush_size_slider)
+        mask_edit_layout.addWidget(self.brush_size_value_label)
+        mask_edit_layout.addWidget(self.selected_person_label)
+        mask_edit_layout.addStretch()
+        mask_edit_layout.addWidget(self.reset_masks_button)
+
+        # Hide editing controls initially
+        self.paint_mode_label.hide()
+        self.paint_radio.hide()
+        self.erase_radio.hide()
+        self.brush_size_label.hide()
+        self.brush_size_slider.hide()
+        self.brush_size_value_label.hide()
+        self.selected_person_label.hide()
+        self.reset_masks_button.hide()
+
+        self.mask_edit_container.hide()
+        layout.addWidget(self.mask_edit_container)
+
         # Buttons
         button_layout = QHBoxLayout()
         self.refresh_button = QPushButton("Refresh")
@@ -221,6 +330,12 @@ class DetectionPreviewDialog(QDialog):
         button_layout.addStretch()
         button_layout.addWidget(self.close_button)
         layout.addLayout(button_layout)
+
+        # Initialize editing state
+        self.edit_mode_enabled = False
+        self.brush_mode = 'paint'  # 'paint' or 'erase'
+        self.original_detections = None  # Backup of original masks
+        self.is_painting = False
 
     def set_image_and_settings(self, image_path: str, detection_settings: dict):
         """Set the image path and detection settings, then run detection after showing dialog."""
@@ -411,6 +526,10 @@ class DetectionPreviewDialog(QDialog):
 
             # Enable show crops button if we have detections
             self.show_crops_button.setEnabled(len(detections) > 0)
+
+            # Enable mask editing if we have detections with masks
+            has_masks = any(d.get('mask') is not None for d in detections)
+            self.mask_edit_container.setVisible(has_masks)
 
         except Exception as e:
             QMessageBox.critical(
@@ -619,6 +738,11 @@ class DetectionPreviewDialog(QDialog):
 
         # Set highlighted person and defer redraw to allow UI update
         self.highlighted_person = row
+
+        # Update edit label if in edit mode
+        if self.edit_mode_enabled:
+            self.selected_person_label.setText(f"Editing: Person {row + 1}")
+
         QTimer.singleShot(50, self.redraw_with_highlight)
 
     def redraw_with_highlight(self):
@@ -657,6 +781,133 @@ class DetectionPreviewDialog(QDialog):
             # Hide loading indicator and re-enable table
             self.loading_label.hide()
             self.detection_table.setEnabled(True)
+
+    def toggle_edit_mode(self):
+        """Toggle mask editing mode."""
+        self.edit_mode_enabled = self.edit_mode_checkbox.isChecked()
+
+        if self.edit_mode_enabled:
+            # Show editing controls
+            self.paint_mode_label.show()
+            self.paint_radio.show()
+            self.erase_radio.show()
+            self.brush_size_label.show()
+            self.brush_size_slider.show()
+            self.brush_size_value_label.show()
+            self.selected_person_label.show()
+            self.reset_masks_button.show()
+
+            # Backup original masks
+            if self.original_detections is None:
+                import copy
+                self.original_detections = copy.deepcopy(self.current_detections)
+
+            # Update selected person label
+            if self.highlighted_person is not None:
+                self.selected_person_label.setText(f"Editing: Person {self.highlighted_person + 1}")
+            else:
+                self.selected_person_label.setText("Select a person from the table")
+
+            # Enable painting on graphics view
+            self.graphics_view.edit_mode_enabled = True
+            self.graphics_view.detection_dialog = self
+            # Disable panning to allow painting
+            self.graphics_view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        else:
+            # Hide editing controls
+            self.paint_mode_label.hide()
+            self.paint_radio.hide()
+            self.erase_radio.hide()
+            self.brush_size_label.hide()
+            self.brush_size_slider.hide()
+            self.brush_size_value_label.hide()
+            self.selected_person_label.hide()
+            self.reset_masks_button.hide()
+
+            # Disable painting and restore panning
+            self.graphics_view.edit_mode_enabled = False
+            self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def set_brush_mode(self, mode: str):
+        """Set brush mode to 'paint' or 'erase'."""
+        self.brush_mode = mode
+        if mode == 'paint':
+            self.paint_radio.setChecked(True)
+            self.erase_radio.setChecked(False)
+        else:
+            self.paint_radio.setChecked(False)
+            self.erase_radio.setChecked(True)
+
+    def reset_masks(self):
+        """Reset all masks to original state."""
+        if self.original_detections is not None:
+            import copy
+            self.current_detections = copy.deepcopy(self.original_detections)
+            self.original_detections = None
+
+            # Re-draw with original masks
+            self.redraw_with_highlight()
+
+            QMessageBox.information(
+                self,
+                "Masks Reset",
+                "All masks have been reset to their original state."
+            )
+
+    def paint_mask_at(self, x: int, y: int, brush_size: int):
+        """Paint or erase mask at the given image coordinates."""
+        if self.highlighted_person is None:
+            return
+
+        if not (0 <= self.highlighted_person < len(self.current_detections)):
+            return
+
+        detection = self.current_detections[self.highlighted_person]
+        mask = detection.get('mask')
+
+        if mask is None:
+            return
+
+        # Get brush radius
+        radius = brush_size // 2
+
+        # Create circular brush
+        import cv2
+        height, width = mask.shape
+
+        # Clamp coordinates
+        y = max(0, min(height - 1, y))
+        x = max(0, min(width - 1, x))
+
+        # Create circular mask for brush
+        y_indices, x_indices = np.ogrid[-radius:radius+1, -radius:radius+1]
+        circle_mask = x_indices**2 + y_indices**2 <= radius**2
+
+        # Calculate brush bounds
+        y_min = max(0, y - radius)
+        y_max = min(height, y + radius + 1)
+        x_min = max(0, x - radius)
+        x_max = min(width, x + radius + 1)
+
+        # Adjust circle mask if brush extends beyond image
+        circle_y_min = max(0, radius - y)
+        circle_y_max = circle_y_min + (y_max - y_min)
+        circle_x_min = max(0, radius - x)
+        circle_x_max = circle_x_min + (x_max - x_min)
+
+        circle_mask_crop = circle_mask[circle_y_min:circle_y_max, circle_x_min:circle_x_max]
+
+        # Apply paint or erase
+        if self.brush_mode == 'paint':
+            mask[y_min:y_max, x_min:x_max] |= circle_mask_crop
+        else:  # erase
+            mask[y_min:y_max, x_min:x_max] &= ~circle_mask_crop
+
+        # Update the detection's mask
+        detection['mask'] = mask
+
+        # Re-draw to show changes
+        self.redraw_with_highlight()
 
     def update_detection_table(self, detections: list):
         """Update the detection info table."""
