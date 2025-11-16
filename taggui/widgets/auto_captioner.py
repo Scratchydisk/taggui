@@ -1005,9 +1005,8 @@ class DetectionPreviewDialog(QDialog):
             logger.info(f"⏱️  update_crop_cards took {time.time() - cards_start:.3f}s")
             logger.debug("Crop card generation complete")
 
-            # Enable mask editing if we have detections with masks
+            # Check if we have masks
             has_masks = any(d.get('mask') is not None for d in detections)
-            self.mask_edit_container.setVisible(has_masks)
 
             # Enable add person button if image is available
             self.add_person_button.setEnabled(self.current_image is not None)
@@ -1021,12 +1020,8 @@ class DetectionPreviewDialog(QDialog):
                 self.save_edited_masks()
                 logger.info(f"⏱️  Auto-saved masks to cache in {time.time() - save_start:.3f}s")
 
-            # For cached detections, auto-enable edit mode if masks exist
-            if from_cache and has_masks:
-                self.edit_mode_checkbox.setChecked(True)
-                self.toggle_edit_mode()
-                # Re-draw to show loaded masks
-                self.redraw_with_highlight()
+            # Enable painting on graphics view (editing always available)
+            self.toggle_edit_mode()
 
             total_display_time = time.time() - start_time
             logger.info(f"⏱️  TOTAL display_detections took {total_display_time:.3f}s")
