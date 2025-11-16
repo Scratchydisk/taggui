@@ -244,6 +244,112 @@ class PersonDetector:
             logger.error(f"Error cropping image: {e}")
             raise
 
+    def detect_people_iteratively(
+        self,
+        image_path: str,
+        expected_count: int,
+        max_iterations: int = 3
+    ) -> tuple[List[Dict], int]:
+        """
+        Iteratively detect people by masking out detected people and re-detecting.
+
+        This method is more effective than splitting merged detections when people
+        are close together or overlapping. It masks out already-detected people
+        and re-runs YOLO to find remaining people.
+
+        Args:
+            image_path: Path to image file
+            expected_count: Expected number of people (from WD Tagger tags)
+            max_iterations: Maximum detection iterations. Default: 3
+
+        Returns:
+            Tuple of (detections, initial_detection_count):
+            - detections: Combined list of all detected people
+            - initial_detection_count: Number found in first iteration
+        """
+        # Initial detection
+        initial_detections = self.detect_people(image_path)
+        initial_count = len(initial_detections)
+
+        if initial_count >= expected_count or initial_count >= self.max_people:
+            # Already have enough detections
+            return initial_detections, initial_count
+
+        if initial_count == 0:
+            # No detections at all
+            return initial_detections, initial_count
+
+        logger.info(
+            f"Iterative detection: initial={initial_count}, expected={expected_count}. "
+            f"Will attempt up to {max_iterations} iterations."
+        )
+
+        # Load image for masking
+        image = Image.open(image_path).convert('RGB')
+        image_array = np.array(image)
+
+        all_detections = list(initial_detections)
+
+        for iteration in range(1, max_iterations + 1):
+            if len(all_detections) >= expected_count or len(all_detections) >= self.max_people:
+                logger.info(f"Stopping iteration: reached target count")
+                break
+
+            # Create mask for all detected people
+            mask = np.zeros((image.height, image.width), dtype=bool)
+
+            for detection in all_detections:
+                if detection.get('mask') is not None and self.use_segmentation:
+                    # Use segmentation mask
+                    person_mask = detection['mask']
+                    mask = mask | person_mask
+                else:
+                    # Use bounding box
+                    x1, y1, x2, y2 = detection['bbox']
+                    mask[y1:y2, x1:x2] = True
+
+            # Apply mask to image (grey out detected people)
+            masked_image_array = image_array.copy()
+            masked_image_array[mask] = 127  # Neutral grey
+
+            # Save masked image temporarily
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                masked_image = Image.fromarray(masked_image_array)
+                masked_image.save(tmp_file.name)
+                temp_path = tmp_file.name
+
+            try:
+                # Detect on masked image
+                new_detections = self.detect_people(temp_path)
+
+                if not new_detections:
+                    logger.info(f"Iteration {iteration}: No new detections found")
+                    break
+
+                logger.info(f"Iteration {iteration}: Found {len(new_detections)} new detection(s)")
+                all_detections.extend(new_detections)
+
+            finally:
+                # Clean up temp file
+                import os
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.warning(f"Could not delete temp file {temp_path}: {e}")
+
+        # Sort and limit final results
+        all_detections.sort(key=lambda d: (-d['area'], d['center_y']))
+        if len(all_detections) > self.max_people:
+            all_detections = all_detections[:self.max_people]
+
+        logger.info(
+            f"Iterative detection complete: {len(all_detections)} total "
+            f"(initial: {initial_count}, expected: {expected_count})"
+        )
+
+        return all_detections, initial_count
+
     def get_detection_info(self) -> Dict:
         """
         Get current detection configuration.

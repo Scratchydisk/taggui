@@ -547,11 +547,8 @@ class MultiPersonTagger(AutoCaptioningModel):
                 pil_image.save(temp_path)
 
         try:
-            # Step 1: Detect people
-            detections = self.person_detector.detect_people(str(temp_path))
-
-            # Step 1.5: Attempt to split merged detections if enabled
-            if self.split_merged_people and detections:
+            # Step 1: Detect people (with iterative detection if split_merged_people enabled)
+            if self.split_merged_people:
                 # Tag full image to get expected person count
                 logger.info("Split merged people enabled: tagging full image to get expected count")
                 image_array = self._preprocess_image_for_wd_tagger(pil_image)
@@ -561,39 +558,25 @@ class MultiPersonTagger(AutoCaptioningModel):
                 )
 
                 expected_person_count = self.parse_person_count_from_tags(full_image_tags)
-                detected_person_count = len(detections)
+                logger.info(f"Expected people: {expected_person_count}")
 
-                logger.info(
-                    f"Expected people: {expected_person_count}, "
-                    f"Detected people: {detected_person_count}"
-                )
-
-                # If we detected fewer people than expected, try to split
-                if expected_person_count > detected_person_count > 0:
-                    logger.info(
-                        f"Attempting to split {detected_person_count} detection(s) "
-                        f"to match expected {expected_person_count}"
+                # Use iterative detection if we expect multiple people
+                if expected_person_count > 0:
+                    detections, initial_count = self.person_detector.detect_people_iteratively(
+                        str(temp_path),
+                        expected_person_count,
+                        max_iterations=3
                     )
-
-                    new_detections = []
-                    for detection in detections:
-                        split = self.split_detection_by_connected_components(detection)
-                        new_detections.extend(split)
-
-                    logger.info(f"After splitting: {len(new_detections)} detection(s)")
-
-                    # Sort by area (largest first), then by Y position (top to bottom)
-                    new_detections.sort(key=lambda d: (-d['area'], d['center_y']))
-
-                    # Limit to max_people
-                    if len(new_detections) > self.detection_max_people:
-                        logger.warning(
-                            f"Split resulted in {len(new_detections)} detections, "
-                            f"limiting to {self.detection_max_people}"
-                        )
-                        new_detections = new_detections[:self.detection_max_people]
-
-                    detections = new_detections
+                    logger.info(
+                        f"Iterative detection: found {len(detections)} people "
+                        f"(initial: {initial_count}, expected: {expected_person_count})"
+                    )
+                else:
+                    # No expected people, use standard detection
+                    detections = self.person_detector.detect_people(str(temp_path))
+            else:
+                # Standard detection (no splitting)
+                detections = self.person_detector.detect_people(str(temp_path))
 
             # Step 2: If no people detected, fall back to standard WD Tagger
             if not detections:

@@ -223,13 +223,13 @@ class DetectionPreviewDialog(QDialog):
         settings = self.detection_settings
         mask_status = "enabled" if settings.get('mask_overlapping_people', True) else "disabled"
         mask_method = settings.get('masking_method', 'Bounding box')
-        split_status = "enabled" if settings.get('split_merged_people', True) else "disabled"
+        iterative_status = "enabled" if settings.get('split_merged_people', True) else "disabled"
         text = (
             f"Settings: Confidence={settings.get('detection_confidence', 0.5):.2f}, "
             f"MinSize={settings.get('detection_min_size', 50)}px, "
             f"Padding={settings.get('crop_padding', 10)}px, "
             f"YOLO={settings.get('yolo_model_size', 'm')}, "
-            f"Split={split_status}, "
+            f"Iterative={iterative_status}, "
             f"Masking={mask_status} ({mask_method})"
         )
         self.settings_label.setText(text)
@@ -281,12 +281,8 @@ class DetectionPreviewDialog(QDialog):
                 use_segmentation=use_segmentation
             )
 
-            # Run detection
-            detections = detector.detect_people(self.image_path)
-            original_detection_count = len(detections)
-
             # Apply split merged people if enabled
-            if split_merged_people and detections:
+            if split_merged_people:
                 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
                 from auto_captioning.models.wd_tagger import WdTaggerModel
                 import numpy as np
@@ -320,22 +316,21 @@ class DetectionPreviewDialog(QDialog):
                 # Parse expected person count
                 expected_person_count = MultiPersonTagger.parse_person_count_from_tags(full_image_tags)
 
-                # Apply splitting if needed
-                if expected_person_count > len(detections) > 0:
-                    new_detections = []
-                    for detection in detections:
-                        split = MultiPersonTagger.split_detection_by_connected_components(detection)
-                        new_detections.extend(split)
-
-                    # Sort by area (largest first), then by Y position
-                    new_detections.sort(key=lambda d: (-d['area'], d['center_y']))
-
-                    # Limit to max_people
-                    max_people = self.detection_settings.get('detection_max_people', 10)
-                    if len(new_detections) > max_people:
-                        new_detections = new_detections[:max_people]
-
-                    detections = new_detections
+                # Use iterative detection if we expect people
+                if expected_person_count > 0:
+                    detections, original_detection_count = detector.detect_people_iteratively(
+                        self.image_path,
+                        expected_person_count,
+                        max_iterations=3
+                    )
+                else:
+                    # No expected people, use standard detection
+                    detections = detector.detect_people(self.image_path)
+                    original_detection_count = len(detections)
+            else:
+                # Standard detection (no splitting)
+                detections = detector.detect_people(self.image_path)
+                original_detection_count = len(detections)
 
             # Load image
             pil_image = PilImage.open(self.image_path).convert('RGB')
@@ -377,13 +372,13 @@ class DetectionPreviewDialog(QDialog):
             masks_present = any(d.get('mask') is not None for d in detections)
             mask_info = f" (segmentation masks: {'yes' if masks_present else 'no'})" if use_segmentation else ""
 
-            # Show split info if splitting was applied
-            split_info = ""
+            # Show iterative detection info if applied
+            iteration_info = ""
             if split_merged_people and original_detection_count != count:
-                split_info = f" [split from {original_detection_count}]"
+                iteration_info = f" [iterative: initial={original_detection_count}]"
 
             self.detection_count_label.setText(
-                f"{count} {'person' if count == 1 else 'people'} detected{split_info}{mask_info}"
+                f"{count} {'person' if count == 1 else 'people'} detected{iteration_info}{mask_info}"
             )
 
             # Update table
@@ -788,9 +783,9 @@ class CaptionSettingsForm(QVBoxLayout):
         self.split_merged_people_check_box = SettingsBigCheckBox(
             key='split_merged_people', default=True)
         self.split_merged_people_check_box.setToolTip(
-            'Attempt to split merged people when YOLO detects fewer people than expected.\n'
-            'Uses full-image tagging to determine expected person count, then splits merged\n'
-            'detections using segmentation mask analysis. Requires segmentation model.')
+            'Attempt to detect occluded people when YOLO detects fewer people than expected.\n'
+            'Uses full-image tagging to determine expected person count, then iteratively\n'
+            'masks out detected people and re-runs YOLO to find remaining people.')
 
         self.mask_overlaps_check_box = SettingsBigCheckBox(
             key='mask_overlapping_people', default=True)
@@ -884,7 +879,7 @@ class CaptionSettingsForm(QVBoxLayout):
                                           self.crop_padding_spin_box)
         advanced_mp_settings_form.addRow('YOLO model size',
                                           self.yolo_model_size_combo_box)
-        advanced_mp_settings_form.addRow('Attempt to split merged people',
+        advanced_mp_settings_form.addRow('Detect occluded people',
                                           self.split_merged_people_check_box)
         advanced_mp_settings_form.addRow('Mask overlapping people',
                                           self.mask_overlaps_check_box)
