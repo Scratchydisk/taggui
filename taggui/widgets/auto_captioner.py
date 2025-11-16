@@ -263,18 +263,18 @@ class PersonCard(QWidget):
         self.delete_button = QPushButton("🗑️ Delete")
         self.delete_button.setStyleSheet("""
             QPushButton {
-                background-color: #f44336;
+                background-color: #C62828;
                 color: white;
-                border: 1px solid #d32f2f;
+                border: 1px solid #B71C1C;
                 padding: 6px;
                 border-radius: 4px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #e53935;
+                background-color: #D32F2F;
             }
             QPushButton:pressed {
-                background-color: #c62828;
+                background-color: #B71C1C;
             }
         """)
         self.delete_button.clicked.connect(self.on_delete_clicked)
