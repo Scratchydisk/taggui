@@ -873,51 +873,44 @@ class CaptionSettingsForm(QVBoxLayout):
         advanced_mp_settings_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
+        # ==================== PHASE 1: PERSON DETECTION ====================
+        phase1_label = QLabel('Phase 1: Person Detection')
+        phase1_label.setStyleSheet('font-weight: bold; color: #0066cc;')
+        phase1_desc = QLabel('Finds people using YOLO')
+        phase1_desc.setStyleSheet('color: #666; font-style: italic; font-size: 10px;')
+        advanced_mp_settings_form.addRow(phase1_label)
+        advanced_mp_settings_form.addRow(phase1_desc)
+
         advanced_mp_settings_form.addRow('Minimum person size (px)',
                                           self.detection_min_size_spin_box)
-        advanced_mp_settings_form.addRow('Crop padding (px)',
-                                          self.crop_padding_spin_box)
         advanced_mp_settings_form.addRow('YOLO model size',
                                           self.yolo_model_size_combo_box)
         advanced_mp_settings_form.addRow('Detect occluded people',
                                           self.split_merged_people_check_box)
+
+        # ==================== PHASE 2: CROPPING & MASKING ====================
+        advanced_mp_settings_form.addRow(HorizontalLine())
+        phase2_label = QLabel('Phase 2: Cropping & Masking')
+        phase2_label.setStyleSheet('font-weight: bold; color: #0066cc;')
+        phase2_desc = QLabel('Prepares each person for tagging')
+        phase2_desc.setStyleSheet('color: #666; font-style: italic; font-size: 10px;')
+        advanced_mp_settings_form.addRow(phase2_label)
+        advanced_mp_settings_form.addRow(phase2_desc)
+
+        advanced_mp_settings_form.addRow('Crop padding (px)',
+                                          self.crop_padding_spin_box)
         advanced_mp_settings_form.addRow('Mask overlapping people',
                                           self.mask_overlaps_check_box)
-        advanced_mp_settings_form.addRow('Masking method',
+
+        # Indented sub-settings for masking
+        advanced_mp_settings_form.addRow('  └─ Masking method',
                                           self.masking_method_combo_box)
-        advanced_mp_settings_form.addRow('Preserve target bbox (segmentation)',
+        advanced_mp_settings_form.addRow('  └─ Preserve target bbox',
                                           self.preserve_target_bbox_check_box)
-        advanced_mp_settings_form.addRow('Maximum scene tags',
-                                          self.max_scene_tags_spin_box)
-        advanced_mp_settings_form.addRow('Maximum tags per person',
-                                          self.max_tags_per_person_spin_box)
 
-        # WD Tagger advanced settings for multi-person
-        self.mp_min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
-            key='mp_wd_tagger_min_probability', default=0.35, minimum=0.01,
-            maximum=1)
-        self.mp_min_probability_spin_box.setSingleStep(0.01)
-
-        # Use nested form layout for full-width tags to exclude field
-        mp_tags_to_exclude_form = QFormLayout()
-        mp_tags_to_exclude_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapAllRows)
-        mp_tags_to_exclude_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.mp_tags_to_exclude_text_edit = SettingsPlainTextEdit(
-            key='mp_wd_tagger_tags_to_exclude')
-        set_text_edit_height(self.mp_tags_to_exclude_text_edit, 4)
-        mp_tags_to_exclude_form.addRow('Tags to exclude',
-                                       self.mp_tags_to_exclude_text_edit)
-
-        advanced_mp_settings_form.addRow('Tag confidence threshold',
-                                          self.mp_min_probability_spin_box)
-        advanced_mp_settings_form.addRow(mp_tags_to_exclude_form)
-
-        # Experimental settings section
-        advanced_mp_settings_form.addRow(HorizontalLine())
-        experimental_label = QLabel('Experimental Mask Refinement')
-        experimental_label.setStyleSheet('font-weight: bold; color: #ff8800;')
+        # Experimental mask refinement (nested under masking)
+        experimental_label = QLabel('  └─ Experimental Mask Refinement')
+        experimental_label.setStyleSheet('font-weight: bold; color: #ff8800; font-size: 10px;')
         advanced_mp_settings_form.addRow(experimental_label)
 
         self.mask_erosion_spin_box = FocusedScrollSettingsSpinBox(
@@ -938,12 +931,50 @@ class CaptionSettingsForm(QVBoxLayout):
             'Apply Gaussian blur to mask edges (kernel size).\n'
             'Softens mask boundaries. Must be odd number (will be adjusted).')
 
-        advanced_mp_settings_form.addRow('Mask erosion (px)',
+        advanced_mp_settings_form.addRow('     • Erosion (px)',
                                           self.mask_erosion_spin_box)
-        advanced_mp_settings_form.addRow('Mask dilation (px)',
+        advanced_mp_settings_form.addRow('     • Dilation (px)',
                                           self.mask_dilation_spin_box)
-        advanced_mp_settings_form.addRow('Mask blur (px)',
+        advanced_mp_settings_form.addRow('     • Blur (px)',
                                           self.mask_blur_spin_box)
+
+        # ==================== PHASE 3: TAGGING PARAMETERS ====================
+        advanced_mp_settings_form.addRow(HorizontalLine())
+        phase3_label = QLabel('Phase 3: Tagging Parameters')
+        phase3_label.setStyleSheet('font-weight: bold; color: #0066cc;')
+        phase3_desc = QLabel('WD Tagger settings for people & scene')
+        phase3_desc.setStyleSheet('color: #666; font-style: italic; font-size: 10px;')
+        advanced_mp_settings_form.addRow(phase3_label)
+        advanced_mp_settings_form.addRow(phase3_desc)
+
+        advanced_mp_settings_form.addRow('Maximum tags per person',
+                                          self.max_tags_per_person_spin_box)
+
+        # WD Tagger advanced settings for multi-person
+        self.mp_min_probability_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='mp_wd_tagger_min_probability', default=0.35, minimum=0.01,
+            maximum=1)
+        self.mp_min_probability_spin_box.setSingleStep(0.01)
+
+        advanced_mp_settings_form.addRow('Tag confidence threshold',
+                                          self.mp_min_probability_spin_box)
+
+        # Use nested form layout for full-width tags to exclude field
+        mp_tags_to_exclude_form = QFormLayout()
+        mp_tags_to_exclude_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapAllRows)
+        mp_tags_to_exclude_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mp_tags_to_exclude_text_edit = SettingsPlainTextEdit(
+            key='mp_wd_tagger_tags_to_exclude')
+        set_text_edit_height(self.mp_tags_to_exclude_text_edit, 4)
+        mp_tags_to_exclude_form.addRow('Tags to exclude',
+                                       self.mp_tags_to_exclude_text_edit)
+
+        advanced_mp_settings_form.addRow(mp_tags_to_exclude_form)
+
+        advanced_mp_settings_form.addRow('Maximum scene tags',
+                                          self.max_scene_tags_spin_box)
 
         # Hide advanced settings by default
         self.advanced_mp_settings_container.hide()
