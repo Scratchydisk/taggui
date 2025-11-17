@@ -1,0 +1,3 @@
+person1: solo, pants, shoes, transparent background, 1boy, white pants, jacket, male focus, simple background, white background, white jacket, lower body, white footwear, hand in pocket, sneakers, standing, watermark, fashion
+person2: 1girl, solo, own hands together, white footwear, crossed legs, watson cross, transparent background, high heels, legs, white dress, skirt, standing, interlocked fingers, own hands clasped, simple background, dress, long sleeves, pumps
+scene: watermark

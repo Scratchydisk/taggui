@@ -664,6 +664,26 @@ class DetectionPreviewDialog(QDialog):
         self.mode_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         content_layout.addWidget(self.mode_banner)
 
+        # Action buttons for interactive modes (polygon select, split by line)
+        action_buttons_layout = QHBoxLayout()
+        action_buttons_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Finish polygon button (for polygon select mode)
+        self.finish_polygon_button = QPushButton("Finish Polygon")
+        self.finish_polygon_button.clicked.connect(self.finish_polygon_select)
+        self.finish_polygon_button.setVisible(False)
+        self.finish_polygon_button.setStyleSheet("QPushButton { background-color: #9C27B0; color: white; font-weight: bold; padding: 10px; }")
+        action_buttons_layout.addWidget(self.finish_polygon_button)
+
+        # Finish line button (for split by line mode)
+        self.finish_line_button = QPushButton("Finish Line")
+        self.finish_line_button.clicked.connect(self.finish_split_line)
+        self.finish_line_button.setVisible(False)
+        self.finish_line_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; padding: 10px; }")
+        action_buttons_layout.addWidget(self.finish_line_button)
+
+        content_layout.addLayout(action_buttons_layout)
+
         # Image display with zoomable graphics view
         self.graphics_view = ZoomableGraphicsView()
         self.graphics_scene = QGraphicsScene()
@@ -682,14 +702,6 @@ class DetectionPreviewDialog(QDialog):
         content_layout.addWidget(self.zoom_label)
 
         main_layout.addWidget(content_area, 1)  # Take remaining space
-
-        # Finish line button (for split by line mode, overlays on image)
-        self.finish_line_button = QPushButton("Finish Line")
-        self.finish_line_button.clicked.connect(self.finish_split_line)
-        self.finish_line_button.setVisible(False)
-        self.finish_line_button.setStyleSheet("QPushButton { background-color: #2196F3; color: white; font-weight: bold; }")
-        self.finish_line_button.setParent(content_area)
-        self.finish_line_button.move(10, 10)
 
         # Track selected person
         self.selected_card_index = None
@@ -1650,7 +1662,7 @@ class DetectionPreviewDialog(QDialog):
 
         # Update edit label if in edit mode
         if self.edit_mode_enabled:
-            self.selected_person_label.setText(f"Editing: Person {row + 1}")
+            self.mode_banner.setText(f"Editing: Person {row + 1}")
 
         QTimer.singleShot(50, self.redraw_with_highlight)
 
@@ -1856,9 +1868,9 @@ class DetectionPreviewDialog(QDialog):
         except:
             pass
         self.polygon_select_button.clicked.connect(self.cancel_polygon_select)
-        self.selected_person_label.setText("🟣 POLYGON SELECT MODE - Click points to draw polygon, then 'Finish Polygon'")
-        self.selected_person_label.setStyleSheet("background-color: #9C27B0; color: white; padding: 5px; font-weight: bold;")
-        self.selected_person_label.show()
+        self.mode_banner.setText("🟣 POLYGON SELECT MODE - Click points to draw polygon, then 'Finish Polygon'")
+        self.mode_banner.setStyleSheet("background-color: #9C27B0; color: white; padding: 5px; font-weight: bold;")
+        self.mode_banner.show()
         self.finish_polygon_button.setVisible(False)
 
         # Update mode banner
@@ -1879,12 +1891,8 @@ class DetectionPreviewDialog(QDialog):
         except:
             pass
         self.polygon_select_button.clicked.connect(self.start_polygon_select)
-        if self.highlighted_person is not None:
-            self.selected_person_label.setText(f"Editing: Person {self.highlighted_person + 1}")
-            self.selected_person_label.setStyleSheet("")  # Reset style
-        self.finish_polygon_button.setVisible(False)
 
-        # Update mode banner
+        # Update mode banner (will also hide finish button)
         self.update_mode_banner()
 
         # Redraw to remove polygon
@@ -1906,17 +1914,6 @@ class DetectionPreviewDialog(QDialog):
             logger.debug(f"Clamped polygon point from ({x:.0f}, {y:.0f}) to ({clamped_x:.0f}, {clamped_y:.0f})")
 
         # Update UI
-        num_points = len(self.polygon_points)
-        if num_points == 1:
-            self.selected_person_label.setText("Click more points, then 'Finish Polygon'")
-        else:
-            self.selected_person_label.setText(f"{num_points} points - Click more or 'Finish Polygon'")
-
-        # Show finish button after 3+ points (minimum for polygon)
-        if num_points >= 3:
-            self.finish_polygon_button.setVisible(True)
-
-        # Update mode banner
         self.update_mode_banner()
 
         # Redraw to show the polygon
@@ -2230,19 +2227,17 @@ class DetectionPreviewDialog(QDialog):
         # Enter adding person mode
         self.adding_person_mode = True
 
-        # Auto-enable edit mode
-        if not self.edit_mode_enabled:
-            self.edit_mode_checkbox.setChecked(True)
-            self.toggle_edit_mode()
+        # Ensure edit mode is enabled (always on, but ensure setup)
+        self.toggle_edit_mode()
 
         # Set to paint mode
         self.paint_radio.setChecked(True)
         self.brush_mode = 'paint'
 
         # Update UI with immediate visual feedback
-        self.selected_person_label.setText("🟢 ADD PERSON MODE - Paint the new person, then click 'Finish Adding'")
-        self.selected_person_label.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px; font-weight: bold;")
-        self.selected_person_label.show()
+        self.mode_banner.setText("🟢 ADD PERSON MODE - Paint the new person, then click 'Finish Adding'")
+        self.mode_banner.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px; font-weight: bold;")
+        self.mode_banner.show()
         self.add_person_button.setText("Finish Adding")
         self.add_person_button.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
         try:
@@ -2317,7 +2312,7 @@ class DetectionPreviewDialog(QDialog):
         except:
             pass
         self.add_person_button.clicked.connect(self.add_manual_person)
-        self.selected_person_label.setStyleSheet("")  # Reset style
+        self.mode_banner.setStyleSheet("")  # Reset style
 
         # Update cards
         self.update_crop_cards(self.current_detections)
@@ -2344,18 +2339,13 @@ class DetectionPreviewDialog(QDialog):
         if self.polygon_select_mode:
             self.cancel_polygon_select()
 
-        # Disable edit mode if active
-        if self.edit_mode_checkbox.isChecked():
-            self.edit_mode_checkbox.setChecked(False)
-            self.toggle_edit_mode()
-
         self.split_line_mode = True
         self.split_line_points = []
 
         # Update UI with immediate visual feedback
-        self.selected_person_label.setText("🟦 SPLIT BY LINE MODE - Click points to draw a line, then 'Finish Line'")
-        self.selected_person_label.setStyleSheet("background-color: #2196F3; color: white; padding: 5px; font-weight: bold;")
-        self.selected_person_label.show()
+        self.mode_banner.setText("🟦 SPLIT BY LINE MODE - Click points to draw a line, then 'Finish Line'")
+        self.mode_banner.setStyleSheet("background-color: #2196F3; color: white; padding: 5px; font-weight: bold;")
+        self.mode_banner.show()
         self.split_by_line_button.setText("Cancel Split")
         self.split_by_line_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
         try:
@@ -2382,11 +2372,8 @@ class DetectionPreviewDialog(QDialog):
         except:
             pass
         self.split_by_line_button.clicked.connect(self.start_split_by_line)
-        self.selected_person_label.hide()
-        self.selected_person_label.setStyleSheet("")  # Reset style
-        self.finish_line_button.setVisible(False)
 
-        # Update mode banner
+        # Update mode banner (will also hide finish button)
         self.update_mode_banner()
 
         # Redraw to remove line
@@ -2408,17 +2395,6 @@ class DetectionPreviewDialog(QDialog):
             logger.debug(f"Clamped split line point from ({x:.0f}, {y:.0f}) to ({clamped_x:.0f}, {clamped_y:.0f})")
 
         # Update UI
-        num_points = len(self.split_line_points)
-        if num_points == 1:
-            self.selected_person_label.setText("Click more points, then 'Finish Line'")
-        else:
-            self.selected_person_label.setText(f"{num_points} points - Click more or 'Finish Line'")
-
-        # Show finish button after 2+ points
-        if num_points >= 2:
-            self.finish_line_button.setVisible(True)
-
-        # Update mode banner
         self.update_mode_banner()
 
         # Redraw to show the line
@@ -2852,6 +2828,9 @@ class DetectionPreviewDialog(QDialog):
             else:
                 text = f"🟣 Polygon Select Mode - {points_count} points. Click more or 'Finish Polygon'"
             style = "background-color: #9C27B0;"  # Purple
+            # Show finish polygon button when we have enough points
+            self.finish_polygon_button.setVisible(points_count >= 3)
+            self.finish_line_button.setVisible(False)
         elif self.split_line_mode:
             points_count = len(self.split_line_points)
             if points_count == 0:
@@ -2861,22 +2840,33 @@ class DetectionPreviewDialog(QDialog):
             else:
                 text = f"🟡 Split Line Mode - {points_count} points. Click more or 'Finish Line'"
             style = "background-color: #FFC107;"  # Yellow
+            # Show finish line button when we have at least 2 points
+            self.finish_line_button.setVisible(points_count >= 2)
+            self.finish_polygon_button.setVisible(False)
         elif self.adding_person_mode:
             text = "🟠 Add Person Mode - Paint to create mask, then 'Finish Adding'"
             style = "background-color: #FF9800;"  # Orange
+            self.finish_polygon_button.setVisible(False)
+            self.finish_line_button.setVisible(False)
         elif self.edit_mode_enabled and self.selected_card_index is not None:
             alias = self.current_detections[self.selected_card_index].get('alias', '')
             label = alias if alias else f"Person {self.selected_card_index + 1}"
             text = f"🔵 Edit Mode: {label} - Paint or erase mask"
             style = "background-color: #2196F3;"  # Blue
+            self.finish_polygon_button.setVisible(False)
+            self.finish_line_button.setVisible(False)
         elif self.selected_card_index is not None:
             alias = self.current_detections[self.selected_card_index].get('alias', '')
             label = alias if alias else f"Person {self.selected_card_index + 1}"
             text = f"📝 Selected: {label} - Edit properties below or enable Edit Mode"
             style = "background-color: #4CAF50;"  # Green
+            self.finish_polygon_button.setVisible(False)
+            self.finish_line_button.setVisible(False)
         else:
             text = "🟢 Normal Mode - Select a person card below to edit"
             style = "background-color: #4CAF50;"  # Green
+            self.finish_polygon_button.setVisible(False)
+            self.finish_line_button.setVisible(False)
 
         self.mode_banner.setText(text)
         self.mode_banner.setStyleSheet(f"""
