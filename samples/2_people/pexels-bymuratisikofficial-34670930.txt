@@ -1,3 +1,3 @@
-person1: 1boy, pants, male focus, solo, hands in pockets, grey pants, realistic, facial hair, black shirt, orange vest
-person2: 1boy, male focus, pants, shirt, solo, hands in pockets, striped shirt, vest, looking at viewer, black shirt
-scene: outdoors
+pbmn: A person is wearing a white hard hat a black shirt and an orange safety vest over a black jacket standing with hands in pockets.
+pbmc: A person is wearing a bright yellow high-visibility vest over a black and white striped shirt and blue jeans standing with hands in pockets.
+Scene: The background shows a construction site with a building under construction and a clear sky.
