@@ -67,6 +67,10 @@ class MultiPersonTagger(AutoCaptioningModel):
         else:
             self.person_aliases = []
 
+        # Caption mode: 'lora_tags' or 'fine_tune_caption'
+        self.caption_mode = caption_settings.get('caption_mode', 'lora_tags')
+        self.description_model_name = caption_settings.get('description_model', 'vikhyatk/moondream2')
+
         # WD Tagger settings (construct from mp_ prefixed settings)
         self.wd_tagger_settings = {
             'show_probabilities': False,  # Not shown in console for multi-person
@@ -80,6 +84,7 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.person_detector = None
         self.wd_model = None
         self.scene_extractor = None
+        self.description_model = None  # Lazy-loaded VLM for fine-tune captions
 
     def get_error_message(self) -> str | None:
         """Validate settings and return error message if invalid."""
@@ -861,6 +866,15 @@ class MultiPersonTagger(AutoCaptioningModel):
                 caption = self.thread.tag_separator.join(tags)
                 return caption, caption
 
+            # Branch based on caption mode
+            logger.info(f"Caption mode: {self.caption_mode}")
+            if self.caption_mode == 'fine_tune_caption':
+                # Fine-tune mode: Generate VLM descriptions
+                logger.info("Entering fine-tune caption mode")
+                caption = self._generate_fine_tune_caption(pil_image, detections)
+                return caption, caption
+
+            # LoRA mode: Continue with tag generation
             # Step 3: Tag each detected person (skip disabled ones)
             person_tags_list = []
             person_aliases = []  # Track aliases for enabled people
@@ -1017,4 +1031,456 @@ class MultiPersonTagger(AutoCaptioningModel):
 
         # Join all parts with newline
         caption = '\n'.join(parts)
+        return caption
+
+    def _load_description_model(self):
+        """Lazy-load the VLM model for natural language descriptions."""
+        if self.description_model is not None:
+            return
+
+        try:
+            # Import and instantiate the appropriate model
+            from auto_captioning.models_list import get_model_class
+            from transformers import AutoConfig
+
+            logger.info(f"Loading description model: {self.description_model_name}")
+            model_class = get_model_class(self.description_model_name)
+
+            # Create a caption_settings dict for the VLM by copying current settings
+            # and overriding the model_id
+            vlm_settings = self.caption_settings.copy()
+            vlm_settings['model_id'] = self.description_model_name
+            vlm_settings['prompt'] = ''  # No prompt needed for descriptions
+
+            # Disable flash attention for models that default to it (Phi-3, etc.)
+            # Must modify config BEFORE loading model
+            if 'phi-3' in self.description_model_name.lower():
+                logger.info("Disabling flash attention for Phi-3...")
+                config = AutoConfig.from_pretrained(
+                    self.description_model_name,
+                    trust_remote_code=True
+                )
+                config._attn_implementation = 'eager'
+                vlm_settings['_model_config'] = config  # Pass modified config
+
+            # Instantiate the VLM model
+            self.description_model = model_class(self.thread, vlm_settings)
+
+            # Load the model
+            self.description_model.load_processor_and_model()
+
+            logger.info(f"Description model loaded: {self.description_model_name}")
+
+        except ImportError as e:
+            error_msg = str(e)
+            if 'einops' in error_msg:
+                logger.error(f"Failed to load {self.description_model_name}: Missing 'einops' package. Install with: pip install einops")
+                raise ImportError(f"Description model {self.description_model_name} requires 'einops' package. Install with: pip install einops") from e
+            elif 'flash_attn' in error_msg or 'flash-attn' in error_msg:
+                logger.error(f"Failed to load {self.description_model_name}: Missing 'flash-attn' package. Install with: pip install flash-attn")
+                raise ImportError(f"Description model {self.description_model_name} requires 'flash-attn' package. Install with: pip install flash-attn") from e
+            else:
+                raise
+        except Exception as e:
+            logger.error(f"Failed to load description model {self.description_model_name}: {e}")
+            raise
+
+    @staticmethod
+    def clean_vlm_output(description: str, prompt: str = '') -> str:
+        """
+        Clean up VLM output by removing prompt echo, extra whitespace, etc.
+
+        Args:
+            description: Raw VLM output
+            prompt: The prompt that was used (to remove echoes)
+
+        Returns:
+            Cleaned description
+        """
+        if not description:
+            return "A person in the image."
+
+        # Remove prompt if echoed
+        if prompt and description.startswith(prompt):
+            description = description[len(prompt):].strip()
+
+        # Remove common prefixes that VLMs add
+        prefixes_to_remove = [
+            "The person is ",
+            "This person is ",
+            "The image shows ",
+            "In the image, ",
+            "Description: ",
+            "A: ",
+            "Answer: ",
+            "Sure, ",
+            "Sure! ",
+        ]
+        for prefix in prefixes_to_remove:
+            if description.lower().startswith(prefix.lower()):
+                description = description[len(prefix):].strip()
+
+        # Ensure starts with capital
+        if description:
+            description = description[0].upper() + description[1:]
+
+        # Ensure ends with period
+        if description and not description.endswith(('.', '!', '?')):
+            description += '.'
+
+        # Remove multiple spaces
+        description = ' '.join(description.split())
+
+        # Truncate if too long (max 50 words to be safe)
+        words = description.split()
+        if len(words) > 50:
+            description = ' '.join(words[:50]) + '.'
+
+        return description
+
+    @staticmethod
+    def detect_gender_from_tags(tags: list[str]) -> str:
+        """
+        Detect gender from WD tags.
+
+        Args:
+            tags: List of WD tags
+
+        Returns:
+            'female', 'male', or 'unknown'
+        """
+        if not tags:
+            return 'unknown'
+
+        female_indicators = ['girl', 'woman', 'female', 'feminine', 'lady', 'gal']
+        male_indicators = ['boy', 'man', 'male', 'masculine', 'guy', 'gentleman']
+
+        tags_lower = [tag.lower() for tag in tags]
+        tags_str = ' '.join(tags_lower)
+
+        # Check female indicators
+        if any(indicator in tags_str for indicator in female_indicators):
+            return 'female'
+
+        # Check male indicators
+        if any(indicator in tags_str for indicator in male_indicators):
+            return 'male'
+
+        return 'unknown'
+
+    def describe_person_region(
+        self,
+        pil_image: PilImage.Image,
+        detection: dict,
+        person_index: int
+    ) -> str:
+        """
+        Generate natural language description of a person region using VLM.
+
+        Args:
+            pil_image: Full PIL image
+            detection: Detection dict with 'bbox' and optional 'mask'
+            person_index: Index of person (for logging)
+
+        Returns:
+            Natural language description (15-35 words)
+        """
+        # Ensure description model is loaded
+        self._load_description_model()
+
+        # Create a temporary Image object for the VLM
+        # VLMs expect an Image object with path and image attributes
+        from utils.image import Image
+        import tempfile
+        from pathlib import Path
+        import os
+
+        # Create temp file
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix='.png')
+        os.close(tmp_fd)  # Close the file descriptor
+        tmp_path = Path(tmp_name)
+
+        try:
+            # Crop to person region
+            bbox = detection['bbox']
+            cropped = self.person_detector.crop_person(
+                pil_image,
+                bbox,
+                padding=self.crop_padding
+            )
+
+            # Save cropped region to temp file
+            cropped.save(tmp_path)
+
+            # Create Image object wrapper with dimensions
+            temp_image = Image(path=tmp_path, dimensions=cropped.size)
+            temp_image.image = cropped  # Set the PIL image directly
+
+            # Craft prompt for VLM
+            base_prompt = (
+                "Describe only what you can clearly see of this person in one sentence. "
+                "Focus on visible clothing, appearance, and pose. "
+                "Do not infer or imagine details that are not visible."
+            )
+
+            # Apply model-specific prompt formatting (e.g., Phi-3 needs special tokens)
+            image_prompt = self.description_model.format_prompt(base_prompt)
+
+            logger.debug(f"Calling VLM with model: {self.description_model_name}")
+            logger.debug(f"Base prompt: {base_prompt}")
+            logger.debug(f"Formatted prompt: {image_prompt}")
+            logger.debug(f"Temp image path: {tmp_path}")
+            logger.debug(f"Cropped image size: {cropped.size}")
+
+            # Get model inputs (preprocessed by VLM's processor)
+            # This handles model-specific formatting and preprocessing
+            model_inputs = self.description_model.get_model_inputs(image_prompt, temp_image)
+            logger.debug(f"Model inputs type: {type(model_inputs)}")
+            logger.debug(f"Model inputs keys: {model_inputs.keys() if hasattr(model_inputs, 'keys') else 'N/A'}")
+
+            # Generate description using VLM
+            logger.debug("Calling generate_caption...")
+            description, _ = self.description_model.generate_caption(
+                model_inputs=model_inputs,
+                image_prompt=image_prompt,
+                image=temp_image
+            )
+            logger.debug(f"Raw VLM output: {description}")
+
+            # Clean up description
+            description = self.clean_vlm_output(description, image_prompt)
+
+            logger.debug(f"Person {person_index + 1} description: {description}")
+            return description
+
+        except Exception as e:
+            logger.error(f"Failed to generate description for person {person_index + 1}: {e}", exc_info=True)
+            return f"[ERROR: Description generation failed - {type(e).__name__}]"
+
+        finally:
+            # Always clean up temp file
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up temp file {tmp_path}: {cleanup_error}")
+
+    def describe_scene(
+        self,
+        pil_image: PilImage.Image
+    ) -> str:
+        """
+        Generate brief scene/setting description.
+
+        Args:
+            pil_image: Full PIL image
+
+        Returns:
+            Brief scene description (5-15 words) or empty string
+        """
+        self._load_description_model()
+
+        # Create a temporary Image object for the VLM
+        from utils.image import Image
+        import tempfile
+        from pathlib import Path
+        import os
+
+        # Create temp file
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix='.png')
+        os.close(tmp_fd)  # Close the file descriptor
+        tmp_path = Path(tmp_name)
+
+        try:
+            # Save image to temp file
+            pil_image.save(tmp_path)
+
+            # Create Image object wrapper with dimensions
+            temp_image = Image(path=tmp_path, dimensions=pil_image.size)
+            temp_image.image = pil_image
+
+            # Craft prompt for VLM
+            base_prompt = (
+                "Describe only the visible setting and background in one brief sentence. "
+                "Focus on what is actually visible: surfaces, objects, lighting. "
+                "Do not describe people or infer details you cannot see."
+            )
+
+            # Apply model-specific prompt formatting (e.g., Phi-3 needs special tokens)
+            image_prompt = self.description_model.format_prompt(base_prompt)
+
+            # Get model inputs (preprocessed by VLM's processor)
+            # This handles model-specific formatting and preprocessing
+            model_inputs = self.description_model.get_model_inputs(image_prompt, temp_image)
+
+            # Generate description using VLM
+            logger.debug(f"Generating scene description with {self.description_model_name}...")
+            description, _ = self.description_model.generate_caption(
+                model_inputs=model_inputs,
+                image_prompt=image_prompt,
+                image=temp_image
+            )
+            logger.debug(f"Raw scene output: {description}")
+
+            # Clean up description
+            description = self.clean_vlm_output(description, image_prompt)
+            logger.debug(f"Cleaned scene description: {description}")
+            logger.debug(f"Word count: {len(description.split())}")
+
+            # Only return if substantial description (filter out generic responses)
+            if len(description.split()) >= 3:
+                logger.debug(f"Scene description accepted: {description}")
+                return description
+
+            logger.debug(f"Scene description rejected (too short or empty)")
+            return ""
+
+        except Exception as e:
+            logger.error(f"Failed to generate scene description: {e}", exc_info=True)
+            return ""
+
+        finally:
+            # Always clean up temp file
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up temp file {tmp_path}: {cleanup_error}")
+
+    def _assign_fine_tune_aliases(
+        self,
+        num_people: int,
+        person_tags_list: list[list[str]] = None
+    ) -> list[str]:
+        """
+        Assign aliases for fine-tune mode.
+
+        Priority:
+        1. Use custom aliases from main UI (person_aliases setting)
+        2. Fall back to person1, person2, person3, etc.
+
+        Args:
+            num_people: Number of detected people
+            person_tags_list: Optional list of tags per person (for gender detection)
+
+        Returns:
+            List of aliases
+        """
+        aliases = []
+        for i in range(num_people):
+            # First check if custom alias is available from main UI
+            if i < len(self.person_aliases) and self.person_aliases[i]:
+                aliases.append(self.person_aliases[i])
+            # Fall back to person1, person2, etc.
+            else:
+                aliases.append(f'person{i + 1}')
+
+        return aliases
+
+    def _format_fine_tune_output(
+        self,
+        person_descriptions: list[tuple[str, str]],
+        scene_description: str
+    ) -> str:
+        """
+        Format output for fine-tune mode.
+
+        Args:
+            person_descriptions: List of (alias, description) tuples
+            scene_description: Optional scene description
+
+        Returns:
+            Multi-line formatted caption:
+            sksA: [description]
+            sksB: [description]
+            Scene: [description]
+        """
+        lines = []
+
+        # Add person descriptions
+        for alias, description in person_descriptions:
+            lines.append(f"{alias}: {description}")
+
+        # Add scene description if present
+        if scene_description:
+            lines.append(f"Scene: {scene_description}")
+
+        return '\n'.join(lines)
+
+    def _generate_fine_tune_caption(
+        self,
+        pil_image: PilImage.Image,
+        detections: list[dict]
+    ) -> str:
+        """
+        Generate fine-tune style caption using VLM descriptions.
+
+        Args:
+            pil_image: PIL Image
+            detections: List of detection dicts with 'bbox', 'mask', 'enabled', etc.
+
+        Returns:
+            Multi-line formatted caption:
+            sksA: [description]
+            sksB: [description]
+            Scene: [description]
+        """
+        logger.info(f"Generating fine-tune caption for {len(detections)} detected people")
+
+        # First pass: get WD tags quickly (only for gender detection if 3+ people)
+        person_tags_list = []
+        enabled_detections = [d for d in detections if d.get('enabled', True)]
+
+        if len(enabled_detections) > 2:
+            # Need gender detection for 3+ people
+            for i, detection in enumerate(enabled_detections):
+                try:
+                    bbox = detection['bbox']
+                    cropped = self.person_detector.crop_person(
+                        pil_image,
+                        bbox,
+                        padding=self.crop_padding
+                    )
+
+                    # Quick WD tag for gender detection
+                    crop_array = self._preprocess_image_for_wd_tagger(cropped)
+                    tags, _ = self.wd_model.generate_tags(
+                        crop_array,
+                        self.wd_tagger_settings
+                    )
+                    person_tags_list.append(list(tags)[:20])  # Just need a few for gender
+
+                except Exception as e:
+                    logger.error(f"Error getting tags for person {i+1}: {e}")
+                    person_tags_list.append([])
+
+        # Assign aliases
+        aliases = self._assign_fine_tune_aliases(
+            num_people=len(enabled_detections),
+            person_tags_list=person_tags_list if person_tags_list else None
+        )
+
+        # Generate VLM description for each person
+        person_descriptions = []
+        for i, detection in enumerate(enabled_detections):
+            alias = aliases[i]
+
+            # Generate natural language description
+            description = self.describe_person_region(
+                pil_image=pil_image,
+                detection=detection,
+                person_index=i
+            )
+
+            person_descriptions.append((alias, description))
+
+        # Generate scene description
+        scene_description = ""
+        if self.include_scene_tags:
+            scene_description = self.describe_scene(pil_image)
+
+        # Format output
+        caption = self._format_fine_tune_output(person_descriptions, scene_description)
+
+        logger.info(f"Generated fine-tune caption with {len(person_descriptions)} people")
         return caption

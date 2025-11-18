@@ -3318,6 +3318,53 @@ class CaptionSettingsForm(QVBoxLayout):
         person_aliases_form.addRow('Person aliases',
                                    self.person_aliases_line_edit)
 
+        # Caption mode selector
+        caption_mode_form = QFormLayout()
+        caption_mode_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        caption_mode_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mpt_caption_mode_combo = FocusedScrollSettingsComboBox(
+            key='caption_mode')
+        self.mpt_caption_mode_combo.addItems(['lora_tags', 'fine_tune_caption'])
+        self.mpt_caption_mode_combo.setCurrentText('lora_tags')
+        self.mpt_caption_mode_combo.setToolTip(
+            'LoRA Tags: Comma-separated WD tags with person labels (fast, for LoRA training)\n'
+            'Fine-Tune Caption: Natural language descriptions using VLM (slower, for full model fine-tuning)')
+        caption_mode_form.addRow('Caption mode', self.mpt_caption_mode_combo)
+
+        # Description model selector (for fine-tune mode)
+        desc_model_form = QFormLayout()
+        desc_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        desc_model_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mpt_desc_model_combo = FocusedScrollSettingsComboBox(
+            key='description_model')
+        # Add VLM models suitable for description (use correct HuggingFace IDs)
+        self.mpt_desc_model_combo.addItems([
+            'vikhyatk/moondream2',
+            'microsoft/Florence-2-base',
+            'microsoft/Florence-2-large',
+            'microsoft/Phi-3-vision-128k-instruct',
+            'llava-hf/llava-v1.6-vicuna-7b-hf',
+        ])
+        self.mpt_desc_model_combo.setCurrentText('vikhyatk/moondream2')
+        self.mpt_desc_model_combo.setToolTip(
+            'VLM model used to generate natural language descriptions.\n\n'
+            'vikhyatk/moondream2: Fast and good quality (recommended)\n'
+            'microsoft/Florence-2-base: Very fast but shorter descriptions\n'
+            'microsoft/Florence-2-large: Fast with better quality\n'
+            'microsoft/Phi-3-vision: High quality, medium speed\n'
+            'llava-hf/llava-v1.6-vicuna-7b-hf: Highest quality but slowest')
+        desc_model_form.addRow('Description model', self.mpt_desc_model_combo)
+
+        # Enable/disable description model selector based on mode
+        def on_caption_mode_changed():
+            is_fine_tune = self.mpt_caption_mode_combo.currentText() == 'fine_tune_caption'
+            self.mpt_desc_model_combo.setEnabled(is_fine_tune)
+
+        self.mpt_caption_mode_combo.currentTextChanged.connect(on_caption_mode_changed)
+        on_caption_mode_changed()  # Initial state
+
         # Preview detection button
         self.preview_detection_button = TallPushButton('Preview Detection')
         self.preview_detection_button.setToolTip(
@@ -3345,6 +3392,8 @@ class CaptionSettingsForm(QVBoxLayout):
         multi_person_settings_form.addRow('Maximum people',
                                           self.detection_max_people_spin_box)
         multi_person_settings_form.addRow(person_aliases_form)
+        multi_person_settings_form.addRow(caption_mode_form)
+        multi_person_settings_form.addRow(desc_model_form)
         multi_person_settings_form.addRow('Include scene tags',
                                           self.include_scene_tags_check_box)
         multi_person_settings_form.addRow(self.preview_detection_button)
@@ -3714,6 +3763,8 @@ class CaptionSettingsForm(QVBoxLayout):
             'max_scene_tags': self.max_scene_tags_spin_box.value(),
             'max_tags_per_person': self.max_tags_per_person_spin_box.value(),
             'person_aliases': self.person_aliases_line_edit.text(),
+            'caption_mode': self.mpt_caption_mode_combo.currentText(),
+            'description_model': self.mpt_desc_model_combo.currentText(),
             'wd_model': self.wd_model_combo_box.currentText(),
             'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
             'mp_wd_tagger_tags_to_exclude':

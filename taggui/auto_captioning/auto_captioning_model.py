@@ -108,6 +108,12 @@ class AutoCaptioningModel:
             arguments['quantization_config'] = quantization_config
         if self.device.type == 'cuda':
             arguments['torch_dtype'] = self.dtype
+        # Support custom attn_implementation (e.g., 'eager' to disable flash attention)
+        if 'attn_implementation' in self.caption_settings:
+            arguments['attn_implementation'] = self.caption_settings['attn_implementation']
+        # Support pre-modified config (e.g., for disabling flash attention)
+        if '_model_config' in self.caption_settings:
+            arguments['config'] = self.caption_settings['_model_config']
         return arguments
 
     def load_model(self, model_load_arguments: dict):
