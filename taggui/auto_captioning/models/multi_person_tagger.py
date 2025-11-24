@@ -1349,31 +1349,40 @@ class MultiPersonTagger(AutoCaptioningModel):
 
     def _assign_fine_tune_aliases(
         self,
-        num_people: int,
+        detections: list[dict],
         person_tags_list: list[list[str]] = None
     ) -> list[str]:
         """
         Assign aliases for fine-tune mode.
 
         Priority:
-        1. Use custom aliases from main UI (person_aliases setting)
-        2. Fall back to person1, person2, person3, etc.
+        1. Use detection-level aliases (from detection dialog)
+        2. Fall back to main UI aliases (person_aliases setting)
+        3. Fall back to person1, person2, person3, etc.
 
         Args:
-            num_people: Number of detected people
+            detections: List of detection dicts (only enabled ones)
             person_tags_list: Optional list of tags per person (for gender detection)
 
         Returns:
             List of aliases
         """
         aliases = []
-        for i in range(num_people):
-            # First check if custom alias is available from main UI
-            if i < len(self.person_aliases) and self.person_aliases[i]:
+        for i, detection in enumerate(detections):
+            # First priority: detection-level alias (from preview dialog)
+            detection_alias = detection.get('alias', '').strip()
+            if detection_alias:
+                aliases.append(detection_alias)
+                logger.debug(f"Person {i+1}: using detection alias '{detection_alias}'")
+            # Second priority: main UI alias
+            elif i < len(self.person_aliases) and self.person_aliases[i]:
                 aliases.append(self.person_aliases[i])
+                logger.debug(f"Person {i+1}: using main UI alias '{self.person_aliases[i]}'")
             # Fall back to person1, person2, etc.
             else:
-                aliases.append(f'person{i + 1}')
+                default_alias = f'person{i + 1}'
+                aliases.append(default_alias)
+                logger.debug(f"Person {i+1}: using default alias '{default_alias}'")
 
         return aliases
 
@@ -1456,7 +1465,7 @@ class MultiPersonTagger(AutoCaptioningModel):
 
         # Assign aliases
         aliases = self._assign_fine_tune_aliases(
-            num_people=len(enabled_detections),
+            detections=enabled_detections,
             person_tags_list=person_tags_list if person_tags_list else None
         )
 

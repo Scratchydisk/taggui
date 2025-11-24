@@ -126,6 +126,8 @@ class ZoomableGraphicsView(QGraphicsView):
 
             # Handle painting mode
             if self.edit_mode_enabled:
+                # Save state before starting to paint
+                self.detection_dialog.push_undo_state()
                 # Start painting
                 self.is_painting = True
                 self.paint_at_position(scene_pos)
@@ -292,11 +294,12 @@ class PersonCard(QWidget):
         edit_header.setStyleSheet("font-weight: bold; color: #333; background-color: #e8f4f8; padding: 4px; border-radius: 3px;")
         edit_layout.addWidget(edit_header)
 
-        # Paint/Erase mode
+        # Paint/Erase mode (applies to both brush and polygon)
         mode_layout = QHBoxLayout()
-        self.paint_radio = QPushButton("🖌️ Paint")
+        self.paint_radio = QPushButton("🖌️ Add")
         self.paint_radio.setCheckable(True)
         self.paint_radio.setChecked(True)
+        self.paint_radio.setToolTip("Add to mask (applies to brush and polygon)")
         self.paint_radio.setStyleSheet("""
             QPushButton {
                 background-color: #f0f0f0;
@@ -320,8 +323,9 @@ class PersonCard(QWidget):
         self.paint_radio.clicked.connect(lambda: self.set_brush_mode('paint'))
         mode_layout.addWidget(self.paint_radio)
 
-        self.erase_radio = QPushButton("🧹 Erase")
+        self.erase_radio = QPushButton("🧹 Remove")
         self.erase_radio.setCheckable(True)
+        self.erase_radio.setToolTip("Remove from mask (applies to brush and polygon)")
         self.erase_radio.setStyleSheet("""
             QPushButton {
                 background-color: #f0f0f0;
@@ -475,14 +479,19 @@ class PersonCard(QWidget):
 
     def on_finish_editing(self):
         """Finish editing and save."""
-        self.parent_dialog.finish_editing_person()
+        # Check if we're in polygon mode
+        if self.parent_dialog.polygon_select_mode:
+            self.parent_dialog.finish_polygon_select()
+        else:
+            self.parent_dialog.finish_editing_person()
 
 
 class DetectionPreviewDialog(QDialog):
     """Non-modal dialog for previewing person detection results."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, image_list_model=None):
         super().__init__(parent)
+        self.image_list_model = image_list_model  # For invalidating thumbnails
         self.setWindowTitle("Detection Preview")
 
         # Size dialog larger - 80% of parent or default to large size
@@ -509,6 +518,10 @@ class DetectionPreviewDialog(QDialog):
         self.current_detections = []
         self.current_image = None
         self.highlighted_person = None  # Index of highlighted person (None = all)
+
+        # Undo stack for mask editing
+        from collections import deque
+        self.undo_stack = deque(maxlen=20)  # Keep last 20 states
 
         # Main layout - horizontal split (sidebar | image)
         main_layout = QHBoxLayout(self)
@@ -624,6 +637,13 @@ class DetectionPreviewDialog(QDialog):
         # Connection deferred until graphics_view is created
         tools_layout.addWidget(self.fit_button)
 
+        self.undo_button = QPushButton("↶ Undo")
+        self.undo_button.clicked.connect(self.undo_mask_edit)
+        self.undo_button.setEnabled(False)
+        self.undo_button.setToolTip("Undo last mask edit (Ctrl+Z)")
+        self.undo_button.setShortcut("Ctrl+Z")
+        tools_layout.addWidget(self.undo_button)
+
         sidebar_layout.addWidget(tools_group)
 
         # Close button at bottom
@@ -670,7 +690,7 @@ class DetectionPreviewDialog(QDialog):
 
         # Finish polygon button (for polygon select mode)
         self.finish_polygon_button = QPushButton("Finish Polygon")
-        self.finish_polygon_button.clicked.connect(self.finish_polygon_select)
+        self.finish_polygon_button.clicked.connect(lambda: self._on_finish_polygon_clicked())
         self.finish_polygon_button.setVisible(False)
         self.finish_polygon_button.setStyleSheet("QPushButton { background-color: #9C27B0; color: white; font-weight: bold; padding: 10px; }")
         action_buttons_layout.addWidget(self.finish_polygon_button)
@@ -786,6 +806,10 @@ class DetectionPreviewDialog(QDialog):
         self.image_path = image_path
         self.detection_settings = detection_settings
         self.update_settings_display()
+
+        # Clear undo stack for new image
+        self.undo_stack.clear()
+        self.undo_button.setEnabled(False)
 
         # Clear previous results
         self.graphics_scene.clear()
@@ -1582,6 +1606,9 @@ class DetectionPreviewDialog(QDialog):
         else:
             suggested_alias = f"person{self.selected_card_index + 1} inverse"
 
+        # Save state before adding inverse
+        self.push_undo_state()
+
         # Create new detection
         new_detection = {
             'bbox': bbox,
@@ -1632,6 +1659,9 @@ class DetectionPreviewDialog(QDialog):
 
         if reply != QMessageBox.StandardButton.Yes:
             return
+
+        # Save state before deleting
+        self.push_undo_state()
 
         # Remove from detections
         del self.current_detections[self.selected_card_index]
@@ -1823,28 +1853,40 @@ class DetectionPreviewDialog(QDialog):
         if person_index < len(self.person_cards):
             # Remove old card
             old_card = self.person_cards[person_index]
-            self.cards_layout.removeWidget(old_card)
+            self.people_layout.removeWidget(old_card)
             old_card.deleteLater()
 
             # Create new card with fresh thumbnail
             detection = self.current_detections[person_index]
-            new_card = self._create_crop_card(person_index, detection)
+            new_card = PersonCard(person_index, detection, self)
             self.person_cards[person_index] = new_card
 
+            # Generate and set thumbnail
+            try:
+                crop_pixmap = self._generate_crop_thumbnail(detection, index=person_index)
+                new_card.set_thumbnail(crop_pixmap)
+            except Exception as e:
+                logger.error(f"Failed to generate thumbnail for person {person_index + 1}: {e}")
+
             # Insert at correct position
-            self.cards_layout.insertWidget(person_index, new_card)
+            self.people_layout.insertWidget(person_index, new_card)
 
             # Reselect the card
             self.select_card(person_index)
 
         logger.info(f"Finished editing Person {person_index + 1} - thumbnail updated")
 
-        # Give visual feedback
-        self.finish_editing_button.setText("✓ Saved!")
-        QTimer.singleShot(1500, lambda: self.finish_editing_button.setText("✓ Finish Editing"))
+        # Give visual feedback on the card's finish button
+        if person_index < len(self.person_cards):
+            card = self.person_cards[person_index]
+            card.finish_button.setText("✓ Saved!")
+            QTimer.singleShot(1500, lambda: card.finish_button.setText("✓ Finish"))
 
     def start_polygon_select(self):
         """Start polygon selection mode for adding/erasing mask regions."""
+        logger.info("🟣 START POLYGON SELECT called")
+        logger.info(f"   highlighted_person={self.highlighted_person}")
+
         if self.highlighted_person is None or self.highlighted_person >= len(self.current_detections):
             QMessageBox.warning(
                 self,
@@ -1859,41 +1901,30 @@ class DetectionPreviewDialog(QDialog):
 
         self.polygon_select_mode = True
         self.polygon_points = []
+        logger.info(f"   polygon_select_mode set to True")
 
-        # Update UI with immediate visual feedback
-        self.polygon_select_button.setText("Cancel Polygon")
-        self.polygon_select_button.setStyleSheet("QPushButton { background-color: #f44336; color: white; }")
-        try:
-            self.polygon_select_button.clicked.disconnect()
-        except:
-            pass
-        self.polygon_select_button.clicked.connect(self.cancel_polygon_select)
-        self.mode_banner.setText("🟣 POLYGON SELECT MODE - Click points to draw polygon, then 'Finish Polygon'")
-        self.mode_banner.setStyleSheet("background-color: #9C27B0; color: white; padding: 5px; font-weight: bold;")
-        self.mode_banner.show()
-        self.finish_polygon_button.setVisible(False)
-
-        # Update mode banner
+        # Update mode banner (handles finish button visibility and text)
         self.update_mode_banner()
 
-        logger.info("Entered polygon selection mode")
+        # Update the PersonCard's finish button text to show polygon mode
+        if self.highlighted_person < len(self.person_cards):
+            card = self.person_cards[self.highlighted_person]
+            card.finish_button.setText("✓ Finish Polygon")
+
+        logger.info("✅ Entered polygon selection mode")
 
     def cancel_polygon_select(self):
         """Cancel polygon selection mode."""
         self.polygon_select_mode = False
         self.polygon_points = []
 
-        # Update UI
-        self.polygon_select_button.setText("Polygon Select")
-        self.polygon_select_button.setStyleSheet("")  # Reset style
-        try:
-            self.polygon_select_button.clicked.disconnect()
-        except:
-            pass
-        self.polygon_select_button.clicked.connect(self.start_polygon_select)
-
         # Update mode banner (will also hide finish button)
         self.update_mode_banner()
+
+        # Reset the PersonCard's finish button text
+        if self.highlighted_person is not None and self.highlighted_person < len(self.person_cards):
+            card = self.person_cards[self.highlighted_person]
+            card.finish_button.setText("✓ Finish")
 
         # Redraw to remove polygon
         self.redraw_with_highlight()
@@ -1902,6 +1933,7 @@ class DetectionPreviewDialog(QDialog):
 
     def add_polygon_point(self, x: float, y: float):
         """Add a point to the polygon, clamping to image bounds."""
+        logger.info(f"🔵 Adding polygon point: ({x:.1f}, {y:.1f})")
         # Clamp coordinates to displayed image bounds
         # Get scene rect which represents the displayed image dimensions
         scene_rect = self.graphics_scene.sceneRect()
@@ -1909,18 +1941,31 @@ class DetectionPreviewDialog(QDialog):
         clamped_y = max(0, min(y, scene_rect.height() - 1))
 
         self.polygon_points.append((int(clamped_x), int(clamped_y)))
+        logger.info(f"   Total polygon points: {len(self.polygon_points)}")
 
         if (clamped_x != x or clamped_y != y):
             logger.debug(f"Clamped polygon point from ({x:.0f}, {y:.0f}) to ({clamped_x:.0f}, {clamped_y:.0f})")
 
         # Update UI
         self.update_mode_banner()
+        logger.info(f"   Finish polygon button visible: {self.finish_polygon_button.isVisible()}")
 
         # Redraw to show the polygon
         self.redraw_with_highlight()
 
+    def _on_finish_polygon_clicked(self):
+        """Debug wrapper to verify button click."""
+        logger.info("🔘 FINISH POLYGON BUTTON CLICKED!")
+        logger.info(f"   polygon_select_mode={self.polygon_select_mode}")
+        logger.info(f"   polygon_points={len(self.polygon_points)}")
+        logger.info(f"   highlighted_person={self.highlighted_person}")
+        logger.info(f"   button visible={self.finish_polygon_button.isVisible()}")
+        self.finish_polygon_select()
+
     def finish_polygon_select(self):
         """Finish the polygon and apply to mask."""
+        logger.info(f"finish_polygon_select called: points={len(self.polygon_points)}, highlighted={self.highlighted_person}")
+
         if len(self.polygon_points) < 3:
             QMessageBox.warning(
                 self,
@@ -1929,22 +1974,38 @@ class DetectionPreviewDialog(QDialog):
             )
             return
 
-        if self.highlighted_person is None or self.highlighted_person >= len(self.current_detections):
+        if self.highlighted_person is None:
+            QMessageBox.warning(
+                self,
+                "No Person Selected",
+                "Please select a person before using polygon tools."
+            )
+            return
+
+        if self.highlighted_person >= len(self.current_detections):
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                f"Selected person index {self.highlighted_person} is out of range."
+            )
             return
 
         # Ask whether to add or erase
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QRadioButton, QDialogButtonBox, QLabel
 
         dialog = QDialog(self)
+        # Default based on current brush mode
+        is_paint_mode = (self.brush_mode == 'paint')
         dialog.setWindowTitle("Apply Polygon")
         layout = QVBoxLayout(dialog)
 
-        label = QLabel("Choose how to apply the polygon:")
+        label = QLabel(f"Current mode: {'🖌️ Add' if is_paint_mode else '🧹 Remove'}\n\nHow should the polygon be applied?")
         layout.addWidget(label)
 
         add_radio = QRadioButton("Add to mask")
-        add_radio.setChecked(True)
-        erase_radio = QRadioButton("Erase from mask")
+        add_radio.setChecked(is_paint_mode)
+        erase_radio = QRadioButton("Remove from mask")
+        erase_radio.setChecked(not is_paint_mode)
 
         layout.addWidget(add_radio)
         layout.addWidget(erase_radio)
@@ -1978,6 +2039,9 @@ class DetectionPreviewDialog(QDialog):
                 y = int(y / self.current_display_scale)
             scaled_points.append((x, y))
 
+        # Save state before applying polygon
+        self.push_undo_state()
+
         # Create polygon mask using cv2.fillPoly
         import cv2
         height, width = mask.shape
@@ -2001,17 +2065,67 @@ class DetectionPreviewDialog(QDialog):
         self.save_edited_masks()
         self.redraw_with_highlight()
 
+        # Update thumbnail for the edited person
+        person_index = self.highlighted_person
+        if person_index < len(self.person_cards):
+            # Clear thumbnail cache
+            self.clear_thumbnail_cache_for_person(person_index)
+
+            # Regenerate thumbnail
+            card = self.person_cards[person_index]
+            try:
+                crop_pixmap = self._generate_crop_thumbnail(detection, index=person_index)
+                card.set_thumbnail(crop_pixmap)
+                logger.info(f"Updated thumbnail for Person {person_index + 1} after polygon operation")
+            except Exception as e:
+                logger.error(f"Failed to update thumbnail for person {person_index + 1}: {e}")
+
         logger.info(f"Applied polygon ({len(scaled_points)} points) to Person {self.highlighted_person + 1} - {'added' if add_to_mask else 'erased'}")
 
     def set_brush_mode(self, mode: str):
         """Set brush mode to 'paint' or 'erase'."""
         self.brush_mode = mode
-        if mode == 'paint':
-            self.paint_radio.setChecked(True)
-            self.erase_radio.setChecked(False)
-        else:
-            self.paint_radio.setChecked(False)
-            self.erase_radio.setChecked(True)
+        # Note: Paint/Erase buttons are on PersonCard, not the dialog
+        # The selected PersonCard will update its own buttons via its set_brush_mode method
+
+    def push_undo_state(self):
+        """Save current detection state to undo stack."""
+        import copy
+        # Deep copy the current detections state
+        state = copy.deepcopy(self.current_detections)
+        self.undo_stack.append(state)
+
+        # Enable undo button
+        self.undo_button.setEnabled(True)
+
+        logger.debug(f"Pushed undo state (stack size: {len(self.undo_stack)})")
+
+    def undo_mask_edit(self):
+        """Undo the last mask editing operation."""
+        if not self.undo_stack:
+            logger.warning("Undo stack is empty")
+            return
+
+        # Pop the last state
+        previous_state = self.undo_stack.pop()
+
+        # Restore the state
+        import copy
+        self.current_detections = copy.deepcopy(previous_state)
+
+        # Update undo button state
+        self.undo_button.setEnabled(len(self.undo_stack) > 0)
+
+        # Redraw the view
+        self.redraw_with_highlight()
+
+        # Update all thumbnails
+        self.update_crop_cards(self.current_detections)
+
+        # Save the restored state
+        self.save_edited_masks()
+
+        logger.info(f"Undid last edit (undo stack size: {len(self.undo_stack)})")
 
     def reset_masks(self):
         """Reset all masks to original state."""
@@ -2146,6 +2260,10 @@ class DetectionPreviewDialog(QDialog):
         try:
             np.savez_compressed(mask_file_path, **mask_data)
             logger.debug(f"Saved detection data to {mask_file_path}")
+
+            # Invalidate the thumbnail cache for this image so badge appears/updates
+            if self.image_list_model and self.image_path:
+                self.image_list_model.invalidate_thumbnail(Path(self.image_path))
         except Exception as e:
             logger.error(f"Failed to save detection data: {e}")
 
@@ -2230,8 +2348,7 @@ class DetectionPreviewDialog(QDialog):
         # Ensure edit mode is enabled (always on, but ensure setup)
         self.toggle_edit_mode()
 
-        # Set to paint mode
-        self.paint_radio.setChecked(True)
+        # Set to paint mode (note: paint/erase radio buttons are on PersonCard, not dialog)
         self.brush_mode = 'paint'
 
         # Update UI with immediate visual feedback
@@ -2822,14 +2939,14 @@ class DetectionPreviewDialog(QDialog):
         if self.polygon_select_mode:
             points_count = len(self.polygon_points)
             if points_count == 0:
-                text = "🟣 Polygon Select Mode - Click to add points (min 3)"
+                text = "🟣 Polygon Mode - Click to add points (min 3), then click '✓ Finish Polygon' below"
             elif points_count < 3:
-                text = f"🟣 Polygon Select Mode - {points_count} points. Need {3 - points_count} more"
+                text = f"🟣 Polygon Mode - {points_count} points. Need {3 - points_count} more"
             else:
-                text = f"🟣 Polygon Select Mode - {points_count} points. Click more or 'Finish Polygon'"
+                text = f"🟣 Polygon Mode - {points_count} points. Click '✓ Finish Polygon' below to apply"
             style = "background-color: #9C27B0;"  # Purple
-            # Show finish polygon button when we have enough points
-            self.finish_polygon_button.setVisible(points_count >= 3)
+            # Don't show the separate finish button - use the PersonCard button instead
+            self.finish_polygon_button.setVisible(False)
             self.finish_line_button.setVisible(False)
         elif self.split_line_mode:
             points_count = len(self.split_line_points)
@@ -3148,8 +3265,9 @@ class DetectionPreviewDialog(QDialog):
 
 
 class CaptionSettingsForm(QVBoxLayout):
-    def __init__(self):
+    def __init__(self, parent_captioner=None):
         super().__init__()
+        self.parent_captioner = parent_captioner  # Reference to AutoCaptioner
         self.settings = get_settings()
         try:
             import bitsandbytes
@@ -3816,7 +3934,11 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Create or show dialog
         if not hasattr(self, '_detection_preview_dialog') or not self._detection_preview_dialog:
-            self._detection_preview_dialog = DetectionPreviewDialog(self.parentWidget())
+            image_list_model = self.parent_captioner.image_list_model if self.parent_captioner else None
+            self._detection_preview_dialog = DetectionPreviewDialog(
+                self.parentWidget(),
+                image_list_model=image_list_model
+            )
 
         # Set reference to settings form for refresh
         self._detection_preview_dialog.settings_form = self
@@ -3872,7 +3994,7 @@ class AutoCaptioner(QDockWidget):
         layout.addWidget(self.start_cancel_button)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.console_text_edit)
-        self.caption_settings_form = CaptionSettingsForm()
+        self.caption_settings_form = CaptionSettingsForm(parent_captioner=self)
         layout.addLayout(self.caption_settings_form)
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)

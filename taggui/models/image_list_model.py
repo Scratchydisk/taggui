@@ -8,9 +8,10 @@ from pathlib import Path
 
 import exifread
 import imagesize
-from PySide6.QtCore import (QAbstractListModel, QModelIndex, QSize, Qt, Signal,
+import numpy as np
+from PySide6.QtCore import (QAbstractListModel, QModelIndex, QRectF, QSize, Qt, Signal,
                             Slot)
-from PySide6.QtGui import QIcon, QImageReader, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QImageReader, QPainter, QPixmap
 from PySide6.QtWidgets import QMessageBox
 
 from utils.image import Image
@@ -18,6 +19,85 @@ from utils.settings import DEFAULT_SETTINGS, get_settings
 from utils.utils import get_confirmation_dialog_reply, pluralize
 
 UNDO_STACK_SIZE = 32
+
+
+def get_person_detection_count(image_path: Path) -> int | None:
+    """
+    Check if custom person detection data exists for an image.
+
+    Returns the number of detected people, or None if no detection data exists.
+    """
+    mask_file_path = image_path.with_suffix(image_path.suffix + '.masks.npz')
+
+    if not mask_file_path.exists():
+        return None
+
+    try:
+        # Load mask data to count people
+        mask_data = np.load(mask_file_path, allow_pickle=True)
+
+        # Count person entries (each person has mask, bbox, enabled, alias)
+        person_count = 0
+        for key in mask_data.files:
+            if key.endswith('_mask'):
+                person_count += 1
+
+        return person_count if person_count > 0 else None
+    except Exception:
+        # If file is corrupt or can't be read, return None
+        return None
+
+
+def draw_person_badge(pixmap: QPixmap, person_count: int) -> QPixmap:
+    """
+    Draw a semi-transparent badge showing person count on top-right of pixmap.
+
+    Args:
+        pixmap: The thumbnail pixmap to draw on
+        person_count: Number of people detected
+
+    Returns:
+        Modified pixmap with badge overlay
+    """
+    # Create a copy to draw on
+    result = QPixmap(pixmap)
+
+    painter = QPainter(result)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Badge configuration
+    badge_text = f"👤 {person_count}"
+    badge_padding = 4
+    badge_margin = 4
+
+    # Calculate badge size
+    font = QFont()
+    font.setPixelSize(11)
+    font.setBold(True)
+    painter.setFont(font)
+
+    text_rect = painter.fontMetrics().boundingRect(badge_text)
+    badge_width = text_rect.width() + badge_padding * 2
+    badge_height = text_rect.height() + badge_padding * 2
+
+    # Position in top-right corner
+    badge_x = result.width() - badge_width - badge_margin
+    badge_y = badge_margin
+
+    # Draw semi-transparent background
+    painter.setBrush(QColor(0, 0, 0, 180))  # Dark with 70% opacity
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(badge_x, badge_y, badge_width, badge_height, 3, 3)
+
+    # Draw text
+    painter.setPen(QColor(255, 255, 255))  # White text
+    text_x = badge_x + badge_padding
+    text_y = badge_y + badge_padding + text_rect.height() - painter.fontMetrics().descent()
+    painter.drawText(text_x, text_y, badge_text)
+
+    painter.end()
+
+    return result
 
 
 def get_file_paths(directory_path: Path) -> set[Path]:
@@ -85,6 +165,12 @@ class ImageListModel(QAbstractListModel):
             pixmap = QPixmap.fromImageReader(image_reader).scaledToWidth(
                 self.image_list_image_width,
                 Qt.TransformationMode.SmoothTransformation)
+
+            # Check if custom person detection data exists and add badge
+            person_count = get_person_detection_count(image.path)
+            if person_count is not None:
+                pixmap = draw_person_badge(pixmap, person_count)
+
             thumbnail = QIcon(pixmap)
             image.thumbnail = thumbnail
             return thumbnail
@@ -99,6 +185,27 @@ class ImageListModel(QAbstractListModel):
             # Scale the dimensions to the image width.
             return QSize(self.image_list_image_width,
                          int(self.image_list_image_width * height / width))
+
+    def invalidate_thumbnail(self, image_path: Path):
+        """
+        Invalidate the cached thumbnail for a specific image and refresh the view.
+
+        This is useful when external changes occur (like adding person detection data)
+        that should be reflected in the thumbnail.
+
+        Args:
+            image_path: Path to the image whose thumbnail should be regenerated
+        """
+        # Find the image in the list
+        for index, image in enumerate(self.images):
+            if image.path == image_path:
+                # Clear the cached thumbnail
+                image.thumbnail = None
+
+                # Notify the view that this item's data has changed
+                model_index = self.index(index, 0)
+                self.dataChanged.emit(model_index, model_index, [Qt.ItemDataRole.DecorationRole])
+                break
 
     def load_directory(self, directory_path: Path):
         self.images.clear()

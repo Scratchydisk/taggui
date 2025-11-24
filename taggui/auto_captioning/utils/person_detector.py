@@ -169,7 +169,26 @@ class PersonDetector:
                             else:
                                 mask = mask_data > 0.5  # Convert to boolean mask
 
-                            logger.debug(f"Extracted segmentation mask for person {box_idx+1}: shape={mask.shape}")
+                            # Extend mask to image edges if close to boundary (100px threshold)
+                            mask = self._extend_mask_to_edges(mask, threshold=100)
+
+                            # Update bbox to match the extended mask
+                            if mask is not None and mask.any():
+                                mask_coords = np.argwhere(mask)
+                                y_coords = mask_coords[:, 0]
+                                x_coords = mask_coords[:, 1]
+                                x1 = int(x_coords.min())
+                                y1 = int(y_coords.min())
+                                x2 = int(x_coords.max()) + 1  # +1 because bbox is exclusive
+                                y2 = int(y_coords.max()) + 1
+
+                                # Recalculate area and center_y with updated bbox
+                                width = x2 - x1
+                                height = y2 - y1
+                                area = width * height
+                                center_y = (y1 + y2) // 2
+
+                            logger.debug(f"Extracted segmentation mask for person {box_idx+1}: shape={mask.shape}, updated bbox to [{x1},{y1},{x2},{y2}]")
                         except Exception as e:
                             logger.warning(f"Failed to extract mask for detection {box_idx}: {e}")
                             mask = None
@@ -243,6 +262,90 @@ class PersonDetector:
         except Exception as e:
             logger.error(f"Error cropping image: {e}")
             raise
+
+    def _extend_mask_to_edges(self, mask: np.ndarray, threshold: int = 10) -> np.ndarray:
+        """
+        Extend mask to image edges if mask pixels are within threshold distance of edges.
+
+        This fixes the common issue where YOLO segmentation masks have a small margin
+        even when the person continues to the image edge.
+
+        Args:
+            mask: Boolean mask array (HxW)
+            threshold: Distance in pixels from edge to trigger extension
+
+        Returns:
+            Extended mask array
+        """
+        if mask is None or mask.size == 0:
+            return mask
+
+        height, width = mask.shape
+        extended_mask = mask.copy()
+        extensions = []  # Track which edges were extended
+
+        # Check each edge and extend if mask is close to boundary
+        # Top edge
+        if mask[:threshold, :].any():
+            # Find columns where mask exists near top
+            cols_with_mask = np.where(mask[:threshold, :].any(axis=0))[0]
+            extended_count = 0
+            for col in cols_with_mask:
+                # Find first True pixel in this column
+                first_true = np.where(mask[:, col])[0]
+                if len(first_true) > 0 and first_true[0] < threshold:
+                    # Extend to top edge
+                    extended_mask[:first_true[0], col] = True
+                    extended_count += 1
+            if extended_count > 0:
+                extensions.append(f"top({extended_count} cols)")
+
+        # Bottom edge
+        if mask[-threshold:, :].any():
+            cols_with_mask = np.where(mask[-threshold:, :].any(axis=0))[0]
+            extended_count = 0
+            for col in cols_with_mask:
+                # Find last True pixel in this column
+                last_true = np.where(mask[:, col])[0]
+                if len(last_true) > 0 and last_true[-1] >= height - threshold:
+                    # Extend to bottom edge
+                    extended_mask[last_true[-1]+1:, col] = True
+                    extended_count += 1
+            if extended_count > 0:
+                extensions.append(f"bottom({extended_count} cols)")
+
+        # Left edge
+        if mask[:, :threshold].any():
+            rows_with_mask = np.where(mask[:, :threshold].any(axis=1))[0]
+            extended_count = 0
+            for row in rows_with_mask:
+                # Find first True pixel in this row
+                first_true = np.where(mask[row, :])[0]
+                if len(first_true) > 0 and first_true[0] < threshold:
+                    # Extend to left edge
+                    extended_mask[row, :first_true[0]] = True
+                    extended_count += 1
+            if extended_count > 0:
+                extensions.append(f"left({extended_count} rows)")
+
+        # Right edge
+        if mask[:, -threshold:].any():
+            rows_with_mask = np.where(mask[:, -threshold:].any(axis=1))[0]
+            extended_count = 0
+            for row in rows_with_mask:
+                # Find last True pixel in this row
+                last_true = np.where(mask[row, :])[0]
+                if len(last_true) > 0 and last_true[-1] >= width - threshold:
+                    # Extend to right edge
+                    extended_mask[row, last_true[-1]+1:] = True
+                    extended_count += 1
+            if extended_count > 0:
+                extensions.append(f"right({extended_count} rows)")
+
+        if extensions:
+            logger.info(f"Extended mask to edges (threshold={threshold}px): {', '.join(extensions)}")
+
+        return extended_mask
 
     def detect_people_iteratively(
         self,
