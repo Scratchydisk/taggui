@@ -545,8 +545,8 @@ class MainWindow(QMainWindow):
 
     def connect_auto_captioner_signals(self):
         self.auto_captioner.caption_generated.connect(
-            lambda image_index, _, tags:
-            self.image_list_model.update_image_tags(image_index, tags))
+            lambda image_index, caption, tags, output_type:
+            self._handle_caption_generated(image_index, caption, tags, output_type))
         self.auto_captioner.caption_generated.connect(
             lambda image_index, *_:
             self.image_tags_editor.reload_image_tags_if_changed(image_index,
@@ -554,6 +554,22 @@ class MainWindow(QMainWindow):
         self.auto_captioner.visibilityChanged.connect(
             lambda: self.toggle_auto_captioner_action.setChecked(
                 self.auto_captioner.isVisible()))
+
+    def _handle_caption_generated(self, image_index, caption: str, tags: list[str], output_type: str):
+        """Handle generated caption/tags based on output type.
+
+        Args:
+            image_index: Index of the image
+            caption: Raw generated caption/tags
+            tags: Tags with caption integrated based on caption position
+            output_type: 'tags' or 'caption' indicating which file to save to
+        """
+        if output_type == 'caption':
+            # Save as natural language caption to .caption.txt
+            self.image_list_model.update_image_caption(image_index, caption)
+        else:
+            # Save as tags to .tags.txt
+            self.image_list_model.update_image_tags(image_index, tags, file_type='.tags.txt')
 
     def restore(self):
         # Restore the window geometry and state.

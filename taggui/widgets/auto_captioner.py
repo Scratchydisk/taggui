@@ -1162,6 +1162,20 @@ class DetectionPreviewDialog(QDialog):
             # Enable painting on graphics view (editing always available)
             self.toggle_edit_mode()
 
+            # Force UI update to ensure everything is visible immediately
+            self.graphics_view.viewport().update()
+            self.graphics_scene.update()
+            self.update()  # Update the dialog itself
+            self.repaint()  # Force immediate repaint
+
+            # Ensure dialog is visible and active
+            if not self.isVisible():
+                self.show()
+            self.raise_()
+            self.activateWindow()
+
+            QApplication.processEvents()
+
             total_display_time = time.time() - start_time
             logger.info(f"⏱️  TOTAL display_detections took {total_display_time:.3f}s")
 
@@ -1180,6 +1194,8 @@ class DetectionPreviewDialog(QDialog):
             self.refresh_button.setEnabled(True)
             self.refresh_button.setText("Re-detect")  # Reset button text
             self.reload_button.setEnabled(True)
+            # Force UI update to ensure changes are visible
+            QApplication.processEvents()
 
     def run_detection(self, force_redetect: bool = True):
         """Run person detection and display results.
@@ -3475,12 +3491,105 @@ class CaptionSettingsForm(QVBoxLayout):
             'llava-hf/llava-v1.6-vicuna-7b-hf: Highest quality but slowest')
         desc_model_form.addRow('Description model', self.mpt_desc_model_combo)
 
-        # Enable/disable description model selector based on mode
+        # Enhancement mode selector (for fine-tune caption mode)
+        enhancement_mode_form = QFormLayout()
+        enhancement_mode_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        enhancement_mode_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mpt_enhancement_mode_combo = FocusedScrollSettingsComboBox(
+            key='enhancement_mode')
+        self.mpt_enhancement_mode_combo.addItems(['standard', 'enhanced'])
+        self.mpt_enhancement_mode_combo.setCurrentText('standard')
+        self.mpt_enhancement_mode_combo.setToolTip(
+            'Standard: VLM descriptions only with scene masking (VRAM-efficient)\n'
+            'Enhanced: VLM + LLM fusion for better detail coverage (requires more VRAM)')
+        enhancement_mode_form.addRow('Enhancement mode', self.mpt_enhancement_mode_combo)
+
+        # LLM model selector (for enhanced mode)
+        llm_model_form = QFormLayout()
+        llm_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        llm_model_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mpt_llm_model_combo = FocusedScrollSettingsComboBox(
+            key='llm_model_name')
+        self.mpt_llm_model_combo.addItems([
+            'google/gemma-3-270m-it',
+            'Qwen/Qwen2.5-1.5B-Instruct',
+            'google/gemma-2-2b-it',
+            'microsoft/Phi-3.5-mini-instruct',
+            'Qwen/Qwen2.5-7B-Instruct',
+            'meta-llama/Llama-3.1-8B-Instruct',
+        ])
+        self.mpt_llm_model_combo.setCurrentText('Qwen/Qwen2.5-1.5B-Instruct')
+        self.mpt_llm_model_combo.setToolTip(
+            'LLM model for caption enhancement.\n\n'
+            'ULTRA-LIGHTWEIGHT (Fastest):\n'
+            '• google/gemma-3-270m-it: Ultra-fast, minimal VRAM (~0.5GB quantised)\n\n'
+            'LIGHTWEIGHT (Standard Enhancement):\n'
+            '• Qwen/Qwen2.5-1.5B-Instruct: Recommended lightweight (~1GB VRAM quantised)\n'
+            '• google/gemma-2-2b-it: Also very lightweight (~1-2GB VRAM quantised)\n\n'
+            'STANDARD:\n'
+            '• microsoft/Phi-3.5-mini-instruct: Fast, good quality (~2GB VRAM quantised)\n\n'
+            'HIGH QUALITY (Advanced):\n'
+            '• Qwen/Qwen2.5-7B-Instruct: Excellent quality (~4GB VRAM quantised)\n'
+            '• meta-llama/Llama-3.1-8B-Instruct: Strong quality (~5GB VRAM quantised)')
+        llm_model_form.addRow('LLM model', self.mpt_llm_model_combo)
+
+        # LLM quantisation checkbox
+        self.mpt_llm_quantize_check_box = SettingsBigCheckBox(
+            key='llm_quantize',
+            default=True)
+        self.mpt_llm_quantize_check_box.setToolTip(
+            'Use 4-bit quantisation to reduce VRAM usage (recommended)')
+
+        # Enhancement threshold slider
+        self.mpt_enhancement_threshold_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='enhancement_threshold',
+            default=0.8,
+            minimum=0.0,
+            maximum=1.0)
+        self.mpt_enhancement_threshold_spin_box.setSingleStep(0.05)
+        self.mpt_enhancement_threshold_spin_box.setDecimals(2)
+        self.mpt_enhancement_threshold_spin_box.setSuffix(' (80% = enhance if coverage < 80%)')
+        self.mpt_enhancement_threshold_spin_box.setToolTip(
+            'Enhance descriptions when VLM coverage of WD tags is below this threshold.\n'
+            '0.8 (80%): Enhance only when significant details are missing\n'
+            '0.5 (50%): Enhance more aggressively\n'
+            '1.0 (100%): Always enhance')
+
+        # Masking strategy selector
+        masking_strategy_form = QFormLayout()
+        masking_strategy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        masking_strategy_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self.mpt_masking_strategy_combo = FocusedScrollSettingsComboBox(
+            key='masking_strategy')
+        self.mpt_masking_strategy_combo.addItems(['median', 'blur'])
+        self.mpt_masking_strategy_combo.setCurrentText('median')
+        self.mpt_masking_strategy_combo.setToolTip(
+            'Strategy for masking people from scene descriptions.\n'
+            'Median: Fill person regions with background median colour\n'
+            'Blur: Blur person regions (preserves more context)')
+        masking_strategy_form.addRow('Scene masking', self.mpt_masking_strategy_combo)
+
+        # Enable/disable controls based on modes
         def on_caption_mode_changed():
             is_fine_tune = self.mpt_caption_mode_combo.currentText() == 'fine_tune_caption'
             self.mpt_desc_model_combo.setEnabled(is_fine_tune)
+            self.mpt_enhancement_mode_combo.setEnabled(is_fine_tune)
+            self.mpt_masking_strategy_combo.setEnabled(is_fine_tune)
+            on_enhancement_mode_changed()  # Update enhancement-specific controls
+
+        def on_enhancement_mode_changed():
+            is_fine_tune = self.mpt_caption_mode_combo.currentText() == 'fine_tune_caption'
+            is_enhanced = self.mpt_enhancement_mode_combo.currentText() == 'enhanced'
+            show_llm_controls = is_fine_tune and is_enhanced
+            self.mpt_llm_model_combo.setEnabled(show_llm_controls)
+            self.mpt_llm_quantize_check_box.setEnabled(show_llm_controls)
+            self.mpt_enhancement_threshold_spin_box.setEnabled(show_llm_controls)
 
         self.mpt_caption_mode_combo.currentTextChanged.connect(on_caption_mode_changed)
+        self.mpt_enhancement_mode_combo.currentTextChanged.connect(on_enhancement_mode_changed)
         on_caption_mode_changed()  # Initial state
 
         # Preview detection button
@@ -3512,6 +3621,13 @@ class CaptionSettingsForm(QVBoxLayout):
         multi_person_settings_form.addRow(person_aliases_form)
         multi_person_settings_form.addRow(caption_mode_form)
         multi_person_settings_form.addRow(desc_model_form)
+        multi_person_settings_form.addRow(enhancement_mode_form)
+        multi_person_settings_form.addRow(llm_model_form)
+        multi_person_settings_form.addRow('Use 4-bit quantisation',
+                                          self.mpt_llm_quantize_check_box)
+        multi_person_settings_form.addRow('Enhancement threshold',
+                                          self.mpt_enhancement_threshold_spin_box)
+        multi_person_settings_form.addRow(masking_strategy_form)
         multi_person_settings_form.addRow('Include scene tags',
                                           self.include_scene_tags_check_box)
         multi_person_settings_form.addRow(self.preview_detection_button)
@@ -3887,6 +4003,12 @@ class CaptionSettingsForm(QVBoxLayout):
             'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
             'mp_wd_tagger_tags_to_exclude':
                 self.mp_tags_to_exclude_text_edit.toPlainText(),
+            # Enhancement settings (for fine-tune caption mode)
+            'enhancement_mode': self.mpt_enhancement_mode_combo.currentText(),
+            'llm_model_name': self.mpt_llm_model_combo.currentText(),
+            'llm_quantize': self.mpt_llm_quantize_check_box.isChecked(),
+            'enhancement_threshold': self.mpt_enhancement_threshold_spin_box.value(),
+            'masking_strategy': self.mpt_masking_strategy_combo.currentText(),
             # Experimental mask refinement
             'mask_erosion_size': self.mask_erosion_spin_box.value(),
             'mask_dilation_size': self.mask_dilation_spin_box.value(),
@@ -3956,7 +4078,7 @@ def restore_stdout_and_stderr():
 
 
 class AutoCaptioner(QDockWidget):
-    caption_generated = Signal(QModelIndex, str, list)
+    caption_generated = Signal(QModelIndex, str, list, str)  # image_index, caption, tags, output_type
 
     def __init__(self, image_list_model: ImageListModel,
                  image_list: ImageList):
@@ -4084,6 +4206,16 @@ class AutoCaptioner(QDockWidget):
         alert.setText(text)
         alert.exec()
 
+    @Slot(str, str)
+    def show_error_popup(self, title: str, message: str):
+        """Show an error popup dialog to notify the user of critical errors."""
+        error_dialog = QMessageBox()
+        error_dialog.setIcon(QMessageBox.Icon.Critical)
+        error_dialog.setWindowTitle(title)
+        error_dialog.setText(message)
+        error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        error_dialog.exec()
+
     @Slot()
     def generate_captions(self):
         selected_image_indices = self.image_list.get_selected_image_indices()
@@ -4125,6 +4257,8 @@ class AutoCaptioner(QDockWidget):
             self.caption_generated)
         self.captioning_thread.progress_bar_update_requested.connect(
             self.progress_bar.setValue)
+        self.captioning_thread.error_occurred.connect(
+            self.show_error_popup)
         self.captioning_thread.finished.connect(
             lambda: self.set_is_captioning(False))
         self.captioning_thread.finished.connect(restore_stdout_and_stderr)

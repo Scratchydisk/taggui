@@ -45,6 +45,9 @@ class AutoCaptioningModel:
     model_load_context_manager = nullcontext()
     transformers_model_class = AutoModelForVision2Seq
     image_mode = 'RGB'
+    # Output type: 'caption' for natural language captions, 'tags' for comma-separated tags
+    # This determines which file type to save to (.caption.txt vs .tags.txt)
+    output_type = 'caption'
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',

@@ -229,6 +229,10 @@ class ImageListModel(QAbstractListModel):
         # strings.
         text_file_path_strings = {str(path) for path in file_paths
                                   if path.suffix == '.txt'}
+        tags_file_path_strings = {str(path) for path in file_paths
+                                  if path.name.endswith('.tags.txt')}
+        caption_file_path_strings = {str(path) for path in file_paths
+                                     if path.name.endswith('.caption.txt')}
         for image_path in image_paths:
             try:
                 dimensions = imagesize.get(image_path)
@@ -252,18 +256,40 @@ class ImageListModel(QAbstractListModel):
                 print(f'Failed to get dimensions for {image_path}: '
                       f'{exception}', file=sys.stderr)
                 dimensions = None
+
+            # Load tags with priority: .tags.txt > .txt
             tags = []
+            tags_file_type = '.txt'
+            tags_file_path = Path(str(image_path) + '.tags.txt')
             text_file_path = image_path.with_suffix('.txt')
-            if str(text_file_path) in text_file_path_strings:
-                # `errors='replace'` inserts a replacement marker such as '?'
-                # when there is malformed data.
-                caption = text_file_path.read_text(encoding='utf-8',
+
+            if str(tags_file_path) in tags_file_path_strings:
+                # Load from .tags.txt (highest priority)
+                tags_file_type = '.tags.txt'
+                content = tags_file_path.read_text(encoding='utf-8',
                                                    errors='replace')
-                if caption:
-                    tags = caption.split(self.tag_separator)
+                if content:
+                    tags = content.split(self.tag_separator)
                     tags = [tag.strip() for tag in tags]
                     tags = [tag for tag in tags if tag]
-            image = Image(image_path, dimensions, tags)
+            elif str(text_file_path) in text_file_path_strings:
+                # Fall back to .txt
+                tags_file_type = '.txt'
+                content = text_file_path.read_text(encoding='utf-8',
+                                                   errors='replace')
+                if content:
+                    tags = content.split(self.tag_separator)
+                    tags = [tag.strip() for tag in tags]
+                    tags = [tag for tag in tags if tag]
+
+            # Load caption from .caption.txt if it exists
+            caption = None
+            caption_file_path = Path(str(image_path) + '.caption.txt')
+            if str(caption_file_path) in caption_file_path_strings:
+                caption = caption_file_path.read_text(encoding='utf-8',
+                                                     errors='replace')
+
+            image = Image(image_path, dimensions, tags, caption, tags_file_type)
             self.images.append(image)
         self.images.sort(key=lambda image_: image_.path)
         self.modelReset.emit()
@@ -278,8 +304,15 @@ class ImageListModel(QAbstractListModel):
         self.update_undo_and_redo_actions_requested.emit()
 
     def write_image_tags_to_disk(self, image: Image):
+        """Write image tags to disk using the appropriate file type."""
         try:
-            image.path.with_suffix('.txt').write_text(
+            # Determine the file path based on the tracked file type
+            if image.tags_file_type == '.tags.txt':
+                file_path = Path(str(image.path) + '.tags.txt')
+            else:
+                file_path = image.path.with_suffix('.txt')
+
+            file_path.write_text(
                 self.tag_separator.join(image.tags), encoding='utf-8',
                 errors='replace')
         except OSError:
@@ -287,6 +320,21 @@ class ImageListModel(QAbstractListModel):
             error_message_box.setWindowTitle('Error')
             error_message_box.setIcon(QMessageBox.Icon.Critical)
             error_message_box.setText(f'Failed to save tags for {image.path}.')
+            error_message_box.exec()
+
+    def write_image_caption_to_disk(self, image: Image):
+        """Write image caption to .caption.txt file."""
+        try:
+            if image.caption is not None:
+                caption_file_path = Path(str(image.path) + '.caption.txt')
+                caption_file_path.write_text(
+                    image.caption, encoding='utf-8',
+                    errors='replace')
+        except OSError:
+            error_message_box = QMessageBox()
+            error_message_box.setWindowTitle('Error')
+            error_message_box.setIcon(QMessageBox.Icon.Critical)
+            error_message_box.setText(f'Failed to save caption for {image.path}.')
             error_message_box.exec()
 
     def restore_history_tags(self, is_undo: bool):
@@ -563,13 +611,36 @@ class ImageListModel(QAbstractListModel):
                                   self.index(changed_image_indices[-1]))
         return removed_tag_count
 
-    def update_image_tags(self, image_index: QModelIndex, tags: list[str]):
+    def update_image_tags(self, image_index: QModelIndex, tags: list[str], file_type: str = None):
+        """Update image tags and save to disk.
+
+        Args:
+            image_index: Index of the image to update
+            tags: New tags for the image
+            file_type: Optional file type to use (.txt, .tags.txt). If None, uses existing file_type.
+        """
         image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
-        if image.tags == tags:
+        if image.tags == tags and (file_type is None or image.tags_file_type == file_type):
             return
         image.tags = tags
+        if file_type is not None:
+            image.tags_file_type = file_type
         self.dataChanged.emit(image_index, image_index)
         self.write_image_tags_to_disk(image)
+
+    def update_image_caption(self, image_index: QModelIndex, caption: str):
+        """Update image caption and save to .caption.txt file.
+
+        Args:
+            image_index: Index of the image to update
+            caption: New caption for the image
+        """
+        image: Image = self.data(image_index, Qt.ItemDataRole.UserRole)
+        if image.caption == caption:
+            return
+        image.caption = caption
+        self.dataChanged.emit(image_index, image_index)
+        self.write_image_caption_to_disk(image)
 
     @Slot(list, list)
     def add_tags(self, tags: list[str], image_indices: list[QModelIndex]):

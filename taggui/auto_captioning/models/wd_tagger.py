@@ -91,6 +91,7 @@ class WdTaggerModel:
 
 class WdTagger(AutoCaptioningModel):
     image_mode = 'RGBA'
+    output_type = 'tags'  # WD Tagger generates tags, not captions
 
     def __init__(self,
                  captioning_thread_: 'captioning_thread.CaptioningThread',

@@ -55,11 +55,13 @@ def format_duration(seconds: float) -> str:
 class CaptioningThread(QThread):
     text_outputted = Signal(str)
     clear_console_text_edit_requested = Signal()
-    # The image index, the caption, and the tags with the caption added. The
-    # third parameter must be declared as `list` instead of `list[str]` for it
-    # to work.
-    caption_generated = Signal(QModelIndex, str, list)
+    # The image index, the caption, the tags with the caption added, and the output type.
+    # The third parameter must be declared as `list` instead of `list[str]` for it to work.
+    # output_type is 'tags' or 'caption' to indicate which file to save to.
+    caption_generated = Signal(QModelIndex, str, list, str)
     progress_bar_update_requested = Signal(int)
+    # Error signal for critical errors that need user notification (e.g., CUDA OOM)
+    error_occurred = Signal(str, str)  # (title, message)
 
     def __init__(self, parent, image_list_model: ImageListModel,
                  selected_image_indices: list[QModelIndex],
@@ -115,7 +117,8 @@ class CaptioningThread(QThread):
             caption, console_output_caption = model.generate_caption(
                 model_inputs, image_prompt, image)
             tags = add_caption_to_tags(image.tags, caption, caption_position)
-            self.caption_generated.emit(image_index, caption, tags)
+            output_type = getattr(model, 'output_type', 'caption')  # Default to 'caption' for backwards compatibility
+            self.caption_generated.emit(image_index, caption, tags, output_type)
             if are_multiple_images_selected:
                 self.progress_bar_update_requested.emit(i + 1)
             if i == 0 and not are_multiple_images_selected:

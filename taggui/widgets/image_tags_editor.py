@@ -1,9 +1,9 @@
 from PySide6.QtCore import (QItemSelectionModel, QModelIndex, QStringListModel,
                             QTimer, Qt, Signal, Slot)
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QCursor
 from PySide6.QtWidgets import (QAbstractItemView, QCompleter, QDockWidget,
-                               QLabel, QLineEdit, QListView, QMessageBox,
-                               QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QListView, QMessageBox,
+                               QPlainTextEdit, QVBoxLayout, QWidget)
 from transformers import PreTrainedTokenizerBase
 
 from models.proxy_image_list_model import ProxyImageListModel
@@ -144,6 +144,8 @@ class ImageTagsEditor(QDockWidget):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.image_index = None
+        self.view_mode = 'tags'  # 'tags' or 'caption'
+        self.current_caption = None
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
@@ -154,13 +156,49 @@ class ImageTagsEditor(QDockWidget):
                                          tag_counter_model, image_list,
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
+
+        # Caption viewer (hidden by default)
+        self.caption_text_edit = QPlainTextEdit()
+        self.caption_text_edit.setReadOnly(True)
+        self.caption_text_edit.setPlaceholderText('No caption available')
+        self.caption_text_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.caption_text_edit.setMinimumHeight(100)
+        self.caption_text_edit.hide()
+
         self.token_count_label = QLabel()
+
+        # Clickable file source labels
+        self.file_source_container = QWidget()
+        file_source_layout = QHBoxLayout(self.file_source_container)
+        file_source_layout.setContentsMargins(0, 0, 0, 0)
+        file_source_layout.setSpacing(5)
+
+        self.view_tags_label = QLabel()
+        self.view_tags_label.setStyleSheet('color: grey; font-size: 10px; text-decoration: underline;')
+        self.view_tags_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.view_tags_label.mousePressEvent = lambda event: self.switch_to_tags_view()
+
+        self.separator_label = QLabel('|')
+        self.separator_label.setStyleSheet('color: grey; font-size: 10px;')
+
+        self.view_caption_label = QLabel()
+        self.view_caption_label.setStyleSheet('color: grey; font-size: 10px; text-decoration: underline;')
+        self.view_caption_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.view_caption_label.mousePressEvent = lambda event: self.switch_to_caption_view()
+
+        file_source_layout.addWidget(self.view_tags_label)
+        file_source_layout.addWidget(self.separator_label)
+        file_source_layout.addWidget(self.view_caption_label)
+        file_source_layout.addStretch()
+
         # A container widget is required to use a layout with a `QDockWidget`.
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.addWidget(self.tag_input_box)
         layout.addWidget(self.image_tags_list)
+        layout.addWidget(self.caption_text_edit)
         layout.addWidget(self.token_count_label)
+        layout.addWidget(self.file_source_container)
         self.setWidget(container)
 
         # When a tag is added, select it and scroll to the bottom of the list.
@@ -217,8 +255,79 @@ class ImageTagsEditor(QDockWidget):
             return
         self.image_tag_list_model.setStringList(image.tags)
         self.count_tokens()
+
+        # Store caption for view switching
+        self.current_caption = image.caption
+
+        # Update clickable labels
+        if image.tags_file_type == '.tags.txt':
+            tags_text = f"View tags ({image.path.name}.tags.txt)"
+        else:
+            tags_text = f"View tags ({image.path.stem}.txt)"
+
+        if image.caption:
+            caption_text = f"View caption ({image.path.name}.caption.txt)"
+            self.view_caption_label.setText(caption_text)
+            self.view_caption_label.show()
+            self.separator_label.show()
+        else:
+            self.view_caption_label.hide()
+            self.separator_label.hide()
+
+        self.view_tags_label.setText(tags_text)
+
+        # Update styling to indicate active view
+        self._update_view_styling()
+
+        # Load caption into text edit
+        if image.caption:
+            self.caption_text_edit.setPlainText(image.caption)
+        else:
+            self.caption_text_edit.setPlainText('')
+
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
+
+    def switch_to_tags_view(self):
+        """Switch to viewing tags."""
+        if self.view_mode == 'tags':
+            return
+        self.view_mode = 'tags'
+        self.setWindowTitle('Image Tags')
+        self.tag_input_box.show()
+        self.image_tags_list.show()
+        self.caption_text_edit.hide()
+        self._update_view_styling()
+
+    def switch_to_caption_view(self):
+        """Switch to viewing caption."""
+        if self.view_mode == 'caption':
+            return
+        if not self.current_caption:
+            return  # Don't switch if no caption available
+        self.view_mode = 'caption'
+        self.setWindowTitle('Image Caption')
+        self.tag_input_box.hide()
+        self.image_tags_list.hide()
+        self.caption_text_edit.show()
+        self._update_view_styling()
+
+    def _update_view_styling(self):
+        """Update label styling to indicate which view is active."""
+        if self.view_mode == 'tags':
+            self.view_tags_label.setStyleSheet(
+                'color: blue; font-size: 10px; font-weight: bold; text-decoration: none;'
+            )
+            self.view_caption_label.setStyleSheet(
+                'color: grey; font-size: 10px; text-decoration: underline;'
+            )
+        else:
+            self.view_tags_label.setStyleSheet(
+                'color: grey; font-size: 10px; text-decoration: underline;'
+            )
+            self.view_caption_label.setStyleSheet(
+                'color: blue; font-size: 10px; font-weight: bold; text-decoration: none;'
+            )
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,

@@ -14,6 +14,8 @@ from PIL import Image as PilImage
 import auto_captioning.captioning_thread as captioning_thread
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from auto_captioning.models.wd_tagger import WdTaggerModel
+from auto_captioning.utils.caption_enhancer import CaptionEnhancer
+from auto_captioning.utils.image_masker import ImageMasker
 from auto_captioning.utils.person_detector import PersonDetector
 from auto_captioning.utils.scene_extractor import SceneExtractor
 from utils.image import Image
@@ -71,6 +73,14 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.caption_mode = caption_settings.get('caption_mode', 'lora_tags')
         self.description_model_name = caption_settings.get('description_model', 'vikhyatk/moondream2')
 
+        # Enhancement settings (for fine-tune caption mode)
+        self.enhancement_mode = caption_settings.get('enhancement_mode', 'standard')  # 'standard' or 'enhanced'
+        self.llm_model_name = caption_settings.get('llm_model_name', 'Qwen/Qwen2.5-1.5B-Instruct')  # Lightweight default
+        self.llm_quantize = caption_settings.get('llm_quantize', True)
+        self.enhancement_threshold = caption_settings.get('enhancement_threshold', 0.8)
+        self.masking_strategy = caption_settings.get('masking_strategy', 'median')  # 'median' or 'blur'
+        self.show_debug_masks = caption_settings.get('show_debug_masks', False)
+
         # WD Tagger settings (construct from mp_ prefixed settings)
         self.wd_tagger_settings = {
             'show_probabilities': False,  # Not shown in console for multi-person
@@ -85,6 +95,12 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.wd_model = None
         self.scene_extractor = None
         self.description_model = None  # Lazy-loaded VLM for fine-tune captions
+        self.image_masker = None  # For scene masking
+        self.caption_enhancer = None  # For LLM enhancement (enhanced mode only)
+
+        # Set output type - both modes produce structured multi-line output
+        # that should be saved to .caption.txt to preserve structure
+        self.output_type = 'caption'
 
     def get_error_message(self) -> str | None:
         """Validate settings and return error message if invalid."""
@@ -264,11 +280,41 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.scene_extractor = SceneExtractor()
         logger.info("SceneExtractor loaded")
 
+        # Initialize ImageMasker (for scene masking in fine-tune mode)
+        if self.caption_mode == 'fine_tune_caption':
+            self.image_masker = ImageMasker(strategy=self.masking_strategy)
+            logger.info(f"ImageMasker loaded (strategy: {self.masking_strategy})")
+
+        # Initialize CaptionEnhancer (for enhanced mode only)
+        if self.caption_mode == 'fine_tune_caption' and self.enhancement_mode == 'enhanced':
+            try:
+                self.caption_enhancer = CaptionEnhancer(
+                    model_name=self.llm_model_name,
+                    device=str(self.device),
+                    quantize=self.llm_quantize
+                )
+                logger.info(f"CaptionEnhancer initialized (model: {self.llm_model_name}, quantize: {self.llm_quantize})")
+            except Exception as e:
+                logger.error(f"Failed to initialize CaptionEnhancer: {e}")
+                self.caption_enhancer = None
+                # Notify user of initialization failure
+                if hasattr(self, 'captioning_thread_') and self.captioning_thread_ is not None:
+                    title = "LLM Enhancement Setup Failed"
+                    message = (
+                        f"Failed to initialize the LLM enhancement system.\n\n"
+                        f"Error: {str(e)}\n\n"
+                        f"Falling back to 'standard' mode (VLM-only descriptions).\n"
+                        f"Try selecting a different LLM model or using standard mode."
+                    )
+                    self.captioning_thread_.error_occurred.emit(title, message)
+
         # Return dict with all components
         return {
             'person_detector': self.person_detector,
             'wd_model': self.wd_model,
-            'scene_extractor': self.scene_extractor
+            'scene_extractor': self.scene_extractor,
+            'image_masker': self.image_masker,
+            'caption_enhancer': self.caption_enhancer
         }
 
     def get_captioning_message(
@@ -1177,13 +1223,18 @@ class MultiPersonTagger(AutoCaptioningModel):
         """
         Generate natural language description of a person region using VLM.
 
+        In enhanced mode, also:
+        1. Gets WD tags for coverage analysis
+        2. Analyzes VLM description against tags
+        3. Enhances with LLM if coverage is below threshold
+
         Args:
             pil_image: Full PIL image
             detection: Detection dict with 'bbox' and optional 'mask'
             person_index: Index of person (for logging)
 
         Returns:
-            Natural language description (15-35 words)
+            Natural language description (15-35 words), potentially enhanced
         """
         # Ensure description model is loaded
         self._load_description_model()
@@ -1208,6 +1259,18 @@ class MultiPersonTagger(AutoCaptioningModel):
                 bbox,
                 padding=self.crop_padding
             )
+
+            # Get WD tags if in enhanced mode (for coverage analysis)
+            person_tags = []
+            if self.caption_enhancer is not None:
+                logger.debug(f"Getting WD tags for person {person_index + 1} (for enhancement)")
+                crop_array = self._preprocess_image_for_wd_tagger(cropped)
+                tags_tuple, _ = self.wd_model.generate_tags(
+                    crop_array,
+                    self.wd_tagger_settings
+                )
+                person_tags = list(tags_tuple)
+                logger.debug(f"Person {person_index + 1} tags: {person_tags[:10]}...")
 
             # Save cropped region to temp file
             cropped.save(tmp_path)
@@ -1249,8 +1312,66 @@ class MultiPersonTagger(AutoCaptioningModel):
 
             # Clean up description
             description = self.clean_vlm_output(description, image_prompt)
+            logger.debug(f"Person {person_index + 1} VLM description: {description}")
 
-            logger.debug(f"Person {person_index + 1} description: {description}")
+            # Enhance with LLM if in enhanced mode
+            if self.caption_enhancer is not None and person_tags:
+                # Analyze coverage
+                coverage, missing_tags = self.caption_enhancer.analyse_coverage(
+                    tags=person_tags,
+                    description=description
+                )
+                logger.info(
+                    f"Person {person_index + 1}: Coverage={coverage:.2%}, "
+                    f"Missing={len(missing_tags)} tags"
+                )
+
+                # Enhance if coverage is below threshold
+                if coverage < self.enhancement_threshold:
+                    logger.info(
+                        f"Person {person_index + 1}: Coverage {coverage:.2%} < {self.enhancement_threshold:.2%}, "
+                        "enhancing description..."
+                    )
+                    try:
+                        # Get all important tags for enhancement
+                        important_tags = self.caption_enhancer._filter_important_tags(person_tags)
+
+                        enhanced_description = self.caption_enhancer.enhance_description(
+                            original_desc=description,
+                            missing_tags=missing_tags,
+                            coverage=coverage,
+                            all_tags=important_tags
+                        )
+                        logger.info(f"Person {person_index + 1} enhanced: {enhanced_description}")
+                        description = enhanced_description
+
+                    except Exception as e:
+                        error_msg = str(e)
+                        logger.error(f"Enhancement failed for person {person_index + 1}: {error_msg}")
+
+                        # Check if this is a critical error that needs user notification
+                        if "CUDA out of memory" in error_msg or "Failed to load LLM model" in error_msg:
+                            # Emit error signal to notify user
+                            if hasattr(self, 'captioning_thread_') and self.captioning_thread_ is not None:
+                                title = "LLM Enhancement Failed"
+                                message = (
+                                    f"Failed to load the LLM model for caption enhancement.\n\n"
+                                    f"Error: {error_msg}\n\n"
+                                    f"This is usually caused by insufficient VRAM. Try:\n"
+                                    f"• Selecting a smaller LLM model (e.g., Gemma 3 270M)\n"
+                                    f"• Ensuring 4-bit quantisation is enabled\n"
+                                    f"• Using 'standard' mode instead of 'enhanced'\n"
+                                    f"• Closing other applications using GPU memory\n\n"
+                                    f"Falling back to VLM-only descriptions for this batch."
+                                )
+                                self.captioning_thread_.error_occurred.emit(title, message)
+
+                        # Fall back to original VLM description
+                        logger.info("Falling back to VLM description")
+                else:
+                    logger.debug(f"Person {person_index + 1}: Coverage sufficient, no enhancement needed")
+
+            logger.debug(f"Person {person_index + 1} final description: {description}")
             return description
 
         except Exception as e:
@@ -1267,18 +1388,32 @@ class MultiPersonTagger(AutoCaptioningModel):
 
     def describe_scene(
         self,
-        pil_image: PilImage.Image
+        pil_image: PilImage.Image,
+        detections: list[dict] = None
     ) -> str:
         """
         Generate brief scene/setting description.
 
         Args:
             pil_image: Full PIL image
+            detections: Optional list of person detections for masking
 
         Returns:
             Brief scene description (5-15 words) or empty string
         """
         self._load_description_model()
+
+        # Apply person masking if enabled and detections available
+        scene_image = pil_image
+        if self.image_masker is not None and detections:
+            logger.debug(f"Applying {self.masking_strategy} masking to {len(detections)} person regions")
+
+            # Extract bounding boxes from detections
+            bboxes = [d['bbox'] for d in detections if d.get('enabled', True)]
+
+            if bboxes:
+                scene_image = self.image_masker.mask_persons(pil_image, bboxes)
+                logger.debug("Scene masking applied successfully")
 
         # Create a temporary Image object for the VLM
         from utils.image import Image
@@ -1292,8 +1427,8 @@ class MultiPersonTagger(AutoCaptioningModel):
         tmp_path = Path(tmp_name)
 
         try:
-            # Save image to temp file
-            pil_image.save(tmp_path)
+            # Save masked image to temp file
+            scene_image.save(tmp_path)
 
             # Create Image object wrapper with dimensions
             temp_image = Image(path=tmp_path, dimensions=pil_image.size)
@@ -1483,10 +1618,10 @@ class MultiPersonTagger(AutoCaptioningModel):
 
             person_descriptions.append((alias, description))
 
-        # Generate scene description
+        # Generate scene description (with masking to avoid people contamination)
         scene_description = ""
         if self.include_scene_tags:
-            scene_description = self.describe_scene(pil_image)
+            scene_description = self.describe_scene(pil_image, detections=enabled_detections)
 
         # Format output
         caption = self._format_fine_tune_output(person_descriptions, scene_description)
