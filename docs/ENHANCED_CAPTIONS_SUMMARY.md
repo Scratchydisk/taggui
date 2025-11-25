@@ -51,19 +51,16 @@ Two strategies for removing people from scene descriptions:
 
 **Supported LLM Models:**
 
-**Ultra-Lightweight (Fastest):**
-1. `google/gemma-3-270m-it` - Ultra-fast, minimal VRAM (~0.5GB VRAM quantised)
-
 **Lightweight (Standard Enhancement):**
-2. `Qwen/Qwen2.5-1.5B-Instruct` ⭐ **Default** - Excellent quality for size (~1GB VRAM quantised)
-3. `google/gemma-2-2b-it` - Also very lightweight (~1-2GB VRAM quantised)
+1. `Qwen/Qwen2.5-1.5B-Instruct` ⭐ **Default** - Excellent quality for size (~1GB VRAM quantised)
+2. `google/gemma-2-2b-it` - Also very lightweight (~1-2GB VRAM quantised)
 
 **Standard:**
-4. `microsoft/Phi-3.5-mini-instruct` - Fast, good quality (~2GB VRAM quantised)
+3. `microsoft/Phi-3.5-mini-instruct` - Fast, good quality (~2GB VRAM quantised)
 
 **High Quality (Advanced):**
-5. `Qwen/Qwen2.5-7B-Instruct` - Excellent quality (~4GB VRAM quantised)
-6. `meta-llama/Llama-3.1-8B-Instruct` - Strong quality (~5GB VRAM quantised)
+4. `Qwen/Qwen2.5-7B-Instruct` - Excellent quality (~4GB VRAM quantised)
+5. `meta-llama/Llama-3.1-8B-Instruct` - Strong quality (~5GB VRAM quantised)
 
 **Integration:**
 - Integrated into `MultiPersonTagger.describe_person_region()`
@@ -162,9 +159,8 @@ Image → YOLOv8 Detection →
   - VLM: ~2-3s
   - WD Tags: ~0.5s
   - Coverage analysis: <0.1s
-  - LLM enhancement: ~0.3-2s (when needed, faster with ultra-lightweight models)
-- VRAM usage: VLM + 0.5-5GB for LLM (quantised)
-  - Ultra-lightweight models (270M): +0.5GB
+  - LLM enhancement: ~0.5-2s (when needed, faster with lightweight models)
+- VRAM usage: VLM + 1-5GB for LLM (quantised)
   - Lightweight models (1.5B-2B): +1-2GB
   - Standard models (3.8B): +2GB
   - High quality (7B-8B): +4-5GB

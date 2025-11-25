@@ -1359,7 +1359,7 @@ class MultiPersonTagger(AutoCaptioningModel):
                                     f"Failed to load the LLM model for caption enhancement.\n\n"
                                     f"Error: {error_msg}\n\n"
                                     f"This is usually caused by insufficient VRAM. Try:\n"
-                                    f"• Selecting a smaller LLM model (e.g., Gemma 3 270M)\n"
+                                    f"• Selecting a smaller LLM model (e.g., Qwen 1.5B or Gemma 2B)\n"
                                     f"• Ensuring 4-bit quantisation is enabled\n"
                                     f"• Using 'standard' mode instead of 'enhanced'\n"
                                     f"• Closing other applications using GPU memory\n\n"

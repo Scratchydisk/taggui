@@ -3529,7 +3529,6 @@ class CaptionSettingsForm(QVBoxLayout):
         self.mpt_llm_model_combo = FocusedScrollSettingsComboBox(
             key='llm_model_name')
         self.mpt_llm_model_combo.addItems([
-            'google/gemma-3-270m-it',
             'Qwen/Qwen2.5-1.5B-Instruct',
             'google/gemma-2-2b-it',
             'microsoft/Phi-3.5-mini-instruct',
@@ -3539,8 +3538,6 @@ class CaptionSettingsForm(QVBoxLayout):
         self.mpt_llm_model_combo.setCurrentText('Qwen/Qwen2.5-1.5B-Instruct')
         self.mpt_llm_model_combo.setToolTip(
             'LLM model for caption enhancement.\n\n'
-            'ULTRA-LIGHTWEIGHT (Fastest):\n'
-            '• google/gemma-3-270m-it: Ultra-fast, minimal VRAM (~0.5GB quantised)\n\n'
             'LIGHTWEIGHT (Standard Enhancement):\n'
             '• Qwen/Qwen2.5-1.5B-Instruct: Recommended lightweight (~1GB VRAM quantised)\n'
             '• google/gemma-2-2b-it: Also very lightweight (~1-2GB VRAM quantised)\n\n'
