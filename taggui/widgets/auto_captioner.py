@@ -230,6 +230,7 @@ class PersonCard(QWidget):
         self.alias_input.setPlaceholderText("e.g., singer")
         self.alias_input.setText(detection.get('alias', ''))
         self.alias_input.textChanged.connect(self.on_alias_changed)
+        self.alias_input.editingFinished.connect(self.on_alias_editing_finished)
         alias_layout.addWidget(self.alias_input)
         layout.addLayout(alias_layout)
 
@@ -446,6 +447,13 @@ class PersonCard(QWidget):
         """Handle alias text change."""
         self.detection['alias'] = text
         self.parent_dialog.pending_mask_save = True
+
+    def on_alias_editing_finished(self):
+        """Save aliases immediately when user finishes editing (loses focus or presses Enter)."""
+        if self.parent_dialog.pending_mask_save:
+            logger.debug("Saving aliases after editing finished")
+            self.parent_dialog.save_edited_masks()
+            self.parent_dialog.pending_mask_save = False
 
     def on_enabled_changed(self, state):
         """Handle enabled checkbox change."""
@@ -3278,6 +3286,14 @@ class DetectionPreviewDialog(QDialog):
 
         # Convert back to boolean
         return mask_uint8 > 127
+
+    def closeEvent(self, event):
+        """Save any pending mask/alias changes before closing."""
+        if self.pending_mask_save:
+            logger.info("Saving pending mask/alias changes before closing preview dialog")
+            self.save_edited_masks()
+            self.pending_mask_save = False
+        super().closeEvent(event)
 
 
 class CaptionSettingsForm(QVBoxLayout):
