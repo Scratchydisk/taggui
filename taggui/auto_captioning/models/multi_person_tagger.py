@@ -931,25 +931,26 @@ class MultiPersonTagger(AutoCaptioningModel):
                     logger.info(f"Skipping person {i+1} (disabled)")
                     continue
 
-                try:
-                    # Store alias for this person (for output formatting)
-                    # Use detection alias if set, otherwise fall back to control panel aliases
-                    detection_alias = detection.get('alias', '').strip()
-                    if detection_alias:
-                        # Use alias from preview dialog
-                        person_aliases.append(detection_alias)
-                        logger.debug(f"Person {i+1}: using preview dialog alias '{detection_alias}'")
-                    elif enabled_person_index < len(self.person_aliases):
-                        # Use alias from control panel settings
-                        control_panel_alias = self.person_aliases[enabled_person_index]
-                        person_aliases.append(control_panel_alias)
-                        logger.debug(f"Person {i+1}: using control panel alias '{control_panel_alias}'")
-                    else:
-                        # No alias available
-                        person_aliases.append('')
-                        logger.debug(f"Person {i+1}: no alias")
+                # Store alias for this person (for output formatting)
+                # Do this BEFORE try block to ensure lists stay aligned on error
+                detection_alias = detection.get('alias', '').strip()
+                if detection_alias:
+                    # Use alias from preview dialog
+                    person_aliases.append(detection_alias)
+                    logger.debug(f"Person {i+1}: using preview dialog alias '{detection_alias}'")
+                elif enabled_person_index < len(self.person_aliases):
+                    # Use alias from control panel settings
+                    control_panel_alias = self.person_aliases[enabled_person_index]
+                    person_aliases.append(control_panel_alias)
+                    logger.debug(f"Person {i+1}: using control panel alias '{control_panel_alias}'")
+                else:
+                    # No alias available
+                    person_aliases.append('')
+                    logger.debug(f"Person {i+1}: no alias")
 
-                    enabled_person_index += 1
+                enabled_person_index += 1
+
+                try:
                     # Extract person using segmentation or bbox+masking
                     if self.masking_method == 'Segmentation' and detection.get('mask') is not None:
                         # Extract ONLY the segmented person on white background
