@@ -10,7 +10,8 @@ DEFAULT_SETTINGS = {
     'insert_space_after_tag_separator': True,
     'autocomplete_tags': True,
     'models_directory_path': '',
-    'temp_file_location': 'Source folder'
+    'temp_file_location': 'Source folder',
+    'show_captions_mode': False
 }
 
 

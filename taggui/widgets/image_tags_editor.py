@@ -134,6 +134,9 @@ class ImageTagsList(QListView):
 
 
 class ImageTagsEditor(QDockWidget):
+    # Signal emitted when caption is edited by user
+    caption_changed = Signal(QModelIndex, str)
+
     def __init__(self, proxy_image_list_model: ProxyImageListModel,
                  tag_counter_model: TagCounterModel,
                  image_tag_list_model: QStringListModel, image_list: ImageList,
@@ -144,12 +147,17 @@ class ImageTagsEditor(QDockWidget):
         self.tokenizer = tokenizer
         self.tag_separator = tag_separator
         self.image_index = None
-        self.view_mode = 'tags'  # 'tags' or 'caption'
         self.current_caption = None
+        # Flag to prevent saving when loading a new image
+        self._loading_caption = False
+        # Check if we should start in caption mode
+        settings = get_settings()
+        show_captions = settings.value(
+            'show_captions_mode', defaultValue=False, type=bool)
+        self.view_mode = 'caption' if show_captions else 'tags'
 
         # Each `QDockWidget` needs a unique object name for saving its state.
         self.setObjectName('image_tags_editor')
-        self.setWindowTitle('Image Tags')
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
                              | Qt.DockWidgetArea.RightDockWidgetArea)
         self.tag_input_box = TagInputBox(self.image_tag_list_model,
@@ -157,13 +165,22 @@ class ImageTagsEditor(QDockWidget):
                                          tag_separator)
         self.image_tags_list = ImageTagsList(self.image_tag_list_model)
 
-        # Caption viewer (hidden by default)
+        # Caption editor
         self.caption_text_edit = QPlainTextEdit()
-        self.caption_text_edit.setReadOnly(True)
         self.caption_text_edit.setPlaceholderText('No caption available')
         self.caption_text_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.caption_text_edit.setMinimumHeight(100)
-        self.caption_text_edit.hide()
+        self.caption_text_edit.textChanged.connect(self._on_caption_text_changed)
+
+        # Set initial visibility based on view mode
+        if self.view_mode == 'caption':
+            self.setWindowTitle('Image Caption')
+            self.tag_input_box.hide()
+            self.image_tags_list.hide()
+            self.caption_text_edit.show()
+        else:
+            self.setWindowTitle('Image Tags')
+            self.caption_text_edit.hide()
 
         self.token_count_label = QLabel()
 
@@ -245,13 +262,21 @@ class ImageTagsEditor(QDockWidget):
             proxy_image_index)
         image: Image = self.proxy_image_list_model.data(
             proxy_image_index, Qt.ItemDataRole.UserRole)
-        # If the string list already contains the image's tags, do not reload
-        # them. This is the case when the tags are edited directly through the
-        # image tags editor. Removing this check breaks the functionality of
-        # reordering multiple tags at the same time because it gets interrupted
+        # If the string list already contains the image's tags AND caption hasn't
+        # changed, do not reload. This is the case when the tags are edited directly
+        # through the image tags editor. Removing this check breaks the functionality
+        # of reordering multiple tags at the same time because it gets interrupted
         # after one tag is moved.
         current_string_list = self.image_tag_list_model.stringList()
-        if current_string_list == image.tags:
+        old_caption = getattr(self, 'current_caption', None)
+        # Also check if caption UI state needs updating (e.g., caption label visibility, text content)
+        caption_changed = old_caption != image.caption
+        caption_ui_needs_update = (
+            (image.caption and not self.view_caption_label.isVisible()) or
+            (not image.caption and self.view_caption_label.isVisible()) or
+            (self.caption_text_edit.toPlainText() != (image.caption or ''))
+        )
+        if current_string_list == image.tags and not caption_changed and not caption_ui_needs_update:
             return
         self.image_tag_list_model.setStringList(image.tags)
         self.count_tokens()
@@ -279,11 +304,14 @@ class ImageTagsEditor(QDockWidget):
         # Update styling to indicate active view
         self._update_view_styling()
 
-        # Load caption into text edit
-        if image.caption:
-            self.caption_text_edit.setPlainText(image.caption)
-        else:
-            self.caption_text_edit.setPlainText('')
+        # Load caption into text edit (use flag to prevent auto-save triggering)
+        # Only update if content actually changed to avoid disrupting user's typing
+        current_text = self.caption_text_edit.toPlainText()
+        new_text = image.caption or ''
+        if current_text != new_text:
+            self._loading_caption = True
+            self.caption_text_edit.setPlainText(new_text)
+            self._loading_caption = False
 
         if self.image_tags_list.hasFocus():
             self.select_first_tag()
@@ -299,12 +327,16 @@ class ImageTagsEditor(QDockWidget):
         self.caption_text_edit.hide()
         self._update_view_styling()
 
-    def switch_to_caption_view(self):
-        """Switch to viewing caption."""
+    def switch_to_caption_view(self, force: bool = False):
+        """Switch to viewing caption.
+
+        Args:
+            force: If True, switch even if no caption available (for global toggle)
+        """
         if self.view_mode == 'caption':
             return
-        if not self.current_caption:
-            return  # Don't switch if no caption available
+        if not force and not self.current_caption:
+            return  # Don't switch if no caption available (when clicking label)
         self.view_mode = 'caption'
         self.setWindowTitle('Image Caption')
         self.tag_input_box.hide()
@@ -328,6 +360,30 @@ class ImageTagsEditor(QDockWidget):
             self.view_caption_label.setStyleSheet(
                 'color: blue; font-size: 10px; font-weight: bold; text-decoration: none;'
             )
+
+    @Slot()
+    def _on_caption_text_changed(self):
+        """Handle caption text changes and emit signal to save."""
+        # Don't save when we're just loading a new image
+        if self._loading_caption:
+            return
+        # Don't save if no image is selected
+        if self.image_index is None:
+            return
+        new_caption = self.caption_text_edit.toPlainText()
+        # Update label visibility if caption state changed (empty <-> non-empty)
+        had_caption = bool(self.current_caption)
+        has_caption = bool(new_caption)
+        if had_caption != has_caption:
+            if has_caption:
+                self.view_caption_label.show()
+                self.separator_label.show()
+            else:
+                self.view_caption_label.hide()
+                self.separator_label.hide()
+        # Update local cache and emit signal to save
+        self.current_caption = new_caption
+        self.caption_changed.emit(self.image_index, new_caption)
 
     @Slot()
     def reload_image_tags_if_changed(self, first_changed_index: QModelIndex,

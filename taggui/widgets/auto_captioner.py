@@ -59,6 +59,223 @@ class HorizontalLine(QFrame):
         self.setFrameShadow(QFrame.Shadow.Raised)
 
 
+# VLM model information for the info dialog
+# Models are ordered by stability/compatibility first, then experimental ones at the end
+VLM_MODEL_INFO = [
+    # Stable, well-tested models
+    {
+        'id': 'vikhyatk/moondream2',
+        'name': 'Moondream2',
+        'size': '1.9B',
+        'vram': '~2GB',
+        'speed': 'Very Fast',
+        'strengths': 'Fast, stable, good gaze detection. Recommended default.'
+    },
+    {
+        'id': 'microsoft/Florence-2-base',
+        'name': 'Florence-2 Base',
+        'size': '0.2B',
+        'vram': '~1GB',
+        'speed': 'Fastest',
+        'strengths': 'Extremely fast, best for quick structured outputs.'
+    },
+    {
+        'id': 'microsoft/Florence-2-large',
+        'name': 'Florence-2 Large',
+        'size': '0.7B',
+        'vram': '~1.5GB',
+        'speed': 'Very Fast',
+        'strengths': 'Fast with better quality than base. Good all-rounder.'
+    },
+    {
+        'id': 'microsoft/Phi-3-vision-128k-instruct',
+        'name': 'Phi-3 Vision',
+        'size': '4.2B',
+        'vram': '~3GB',
+        'speed': 'Medium',
+        'strengths': 'Good quality, 128K context. Stable and well-tested.'
+    },
+    # Newer models - may require transformers upgrade (pip install -U transformers)
+    {
+        'id': 'HuggingFaceTB/SmolVLM2-2.2B-Instruct',
+        'name': 'SmolVLM2 2.2B',
+        'size': '2.2B',
+        'vram': '~1.5GB',
+        'speed': 'Very Fast',
+        'strengths': 'Tiny, efficient. Requires transformers>=4.49'
+    },
+    {
+        'id': 'Qwen/Qwen2.5-VL-3B-Instruct',
+        'name': 'Qwen2.5-VL 3B',
+        'size': '3B',
+        'vram': '~2GB',
+        'speed': 'Fast',
+        'strengths': 'Excellent quality. Requires transformers>=4.49 (pip install -U transformers)'
+    },
+    {
+        'id': 'Qwen/Qwen2.5-VL-7B-Instruct',
+        'name': 'Qwen2.5-VL 7B',
+        'size': '7B',
+        'vram': '~4GB',
+        'speed': 'Medium',
+        'strengths': 'Near GPT-4o quality. Requires transformers>=4.49'
+    },
+    {
+        'id': 'openbmb/MiniCPM-V-2_6',
+        'name': 'MiniCPM-V 2.6',
+        'size': '8B',
+        'vram': '~4GB',
+        'speed': 'Medium',
+        'strengths': 'Excellent quality. Requires transformers>=4.46'
+    },
+    {
+        'id': 'google/gemma-3-4b-it',
+        'name': 'Gemma 3 4B',
+        'size': '4B',
+        'vram': '~2.5GB',
+        'speed': 'Fast',
+        'strengths': 'Google multimodal, 128K context. Requires transformers>=4.50'
+    },
+    {
+        'id': 'google/gemma-3-12b-it',
+        'name': 'Gemma 3 12B',
+        'size': '12B',
+        'vram': '~6GB',
+        'speed': 'Slower',
+        'strengths': 'High quality reasoning. Requires transformers>=4.50'
+    },
+]
+
+# LLM model information for the info dialog
+LLM_MODEL_INFO = [
+    {
+        'id': 'Qwen/Qwen2.5-1.5B-Instruct',
+        'name': 'Qwen2.5 1.5B',
+        'size': '1.5B',
+        'vram': '~1GB',
+        'speed': 'Fastest',
+        'strengths': 'Recommended lightweight, very efficient.'
+    },
+    {
+        'id': 'google/gemma-2-2b-it',
+        'name': 'Gemma 2 2B',
+        'size': '2B',
+        'vram': '~1.5GB',
+        'speed': 'Very Fast',
+        'strengths': 'Lightweight, good instruction following.'
+    },
+    {
+        'id': 'Qwen/Qwen2.5-3B-Instruct',
+        'name': 'Qwen2.5 3B',
+        'size': '3B',
+        'vram': '~2GB',
+        'speed': 'Fast',
+        'strengths': 'Good balance of speed and quality.'
+    },
+    {
+        'id': 'microsoft/Phi-3-mini-4k-instruct',
+        'name': 'Phi-3 Mini',
+        'size': '3.8B',
+        'vram': '~2GB',
+        'speed': 'Fast',
+        'strengths': 'Microsoft model, fast with good quality.'
+    },
+    {
+        'id': 'microsoft/Phi-3.5-mini-instruct',
+        'name': 'Phi-3.5 Mini',
+        'size': '3.8B',
+        'vram': '~2GB',
+        'speed': 'Fast',
+        'strengths': 'Improved Phi-3, better instruction following.'
+    },
+    {
+        'id': 'Qwen/Qwen2.5-7B-Instruct',
+        'name': 'Qwen2.5 7B',
+        'size': '7B',
+        'vram': '~4GB',
+        'speed': 'Medium',
+        'strengths': 'Excellent quality, recommended for best results.'
+    },
+    {
+        'id': 'mistralai/Mistral-7B-Instruct-v0.3',
+        'name': 'Mistral 7B v0.3',
+        'size': '7B',
+        'vram': '~4GB',
+        'speed': 'Medium',
+        'strengths': 'Very capable, strong reasoning.'
+    },
+    {
+        'id': 'meta-llama/Llama-3.1-8B-Instruct',
+        'name': 'Llama 3.1 8B',
+        'size': '8B',
+        'vram': '~5GB',
+        'speed': 'Medium',
+        'strengths': 'Meta flagship, strong all-round performance.'
+    },
+    {
+        'id': 'google/gemma-2-9b-it',
+        'name': 'Gemma 2 9B',
+        'size': '9B',
+        'vram': '~5GB',
+        'speed': 'Slower',
+        'strengths': 'High quality, good for detailed enhancement.'
+    },
+]
+
+
+class ModelInfoDialog(QDialog):
+    """Dialog showing model comparison table."""
+
+    def __init__(self, parent=None, model_info=None, title="Model Information"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(800, 400)
+
+        layout = QVBoxLayout(self)
+
+        # Create table
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            'Model', 'Size', 'VRAM (4-bit)', 'Speed', 'Strengths', 'Model ID'
+        ])
+
+        if model_info:
+            table.setRowCount(len(model_info))
+            for row, info in enumerate(model_info):
+                table.setItem(row, 0, QTableWidgetItem(info['name']))
+                table.setItem(row, 1, QTableWidgetItem(info['size']))
+                table.setItem(row, 2, QTableWidgetItem(info['vram']))
+                table.setItem(row, 3, QTableWidgetItem(info['speed']))
+                table.setItem(row, 4, QTableWidgetItem(info['strengths']))
+                table.setItem(row, 5, QTableWidgetItem(info['id']))
+
+        # Configure table appearance
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.ResizeToContents)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+
+        layout.addWidget(table)
+
+        # Close button
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+
 class ZoomableGraphicsView(QGraphicsView):
     """QGraphicsView with mouse wheel zoom and pan support."""
 
@@ -3317,8 +3534,6 @@ class CaptionSettingsForm(QVBoxLayout):
         self.model_combo_box.setEditable(True)
         self.model_combo_box.addItems(self.get_local_model_paths())
         self.model_combo_box.addItems(MODELS)
-        self.prompt_text_edit = SettingsPlainTextEdit(key='prompt')
-        set_text_edit_height(self.prompt_text_edit, 4)
         self.caption_start_line_edit = SettingsLineEdit(key='caption_start')
         self.caption_start_line_edit.setClearButtonEnabled(True)
         self.caption_position_combo_box = FocusedScrollSettingsComboBox(
@@ -3348,8 +3563,6 @@ class CaptionSettingsForm(QVBoxLayout):
         remove_tag_separators_layout.addWidget(
             self.remove_tag_separators_check_box)
         basic_settings_form.addRow('Model', self.model_combo_box)
-        self.prompt_label = QLabel('Prompt')
-        basic_settings_form.addRow(self.prompt_label, self.prompt_text_edit)
         self.caption_start_label = QLabel('Start caption with')
         basic_settings_form.addRow(self.caption_start_label,
                                    self.caption_start_line_edit)
@@ -3469,84 +3682,74 @@ class CaptionSettingsForm(QVBoxLayout):
                                    self.person_aliases_line_edit)
 
         # Caption mode selector
-        caption_mode_form = QFormLayout()
-        caption_mode_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        caption_mode_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mpt_caption_mode_combo = FocusedScrollSettingsComboBox(
             key='caption_mode')
-        self.mpt_caption_mode_combo.addItems(['lora_tags', 'fine_tune_caption'])
-        self.mpt_caption_mode_combo.setCurrentText('lora_tags')
+        self.mpt_caption_mode_combo.addItems(['LoRA Tags', 'Fine-Tune Caption', 'Tags to Caption'])
         self.mpt_caption_mode_combo.setToolTip(
             'LoRA Tags: Comma-separated WD tags with person labels (fast, for LoRA training)\n'
-            'Fine-Tune Caption: Natural language descriptions using VLM (slower, for full model fine-tuning)')
-        caption_mode_form.addRow('Caption mode', self.mpt_caption_mode_combo)
+            'Fine-Tune Caption: Natural language descriptions using VLM (slower, for full model fine-tuning)\n'
+            'Tags to Caption: WD tags converted to natural language by LLM (best detail accuracy)')
 
         # Description model selector (for fine-tune mode)
-        desc_model_form = QFormLayout()
-        desc_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        desc_model_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mpt_desc_model_combo = FocusedScrollSettingsComboBox(
             key='description_model')
-        # Add VLM models suitable for description (use correct HuggingFace IDs)
-        self.mpt_desc_model_combo.addItems([
-            'vikhyatk/moondream2',
-            'microsoft/Florence-2-base',
-            'microsoft/Florence-2-large',
-            'microsoft/Phi-3-vision-128k-instruct',
-            'llava-hf/llava-v1.6-vicuna-7b-hf',
-        ])
-        self.mpt_desc_model_combo.setCurrentText('vikhyatk/moondream2')
+        # Add VLM models from the info list
+        self.mpt_desc_model_combo.addItems([m['id'] for m in VLM_MODEL_INFO])
         self.mpt_desc_model_combo.setToolTip(
-            'VLM model used to generate natural language descriptions.\n\n'
-            'vikhyatk/moondream2: Fast and good quality (recommended)\n'
-            'microsoft/Florence-2-base: Very fast but shorter descriptions\n'
-            'microsoft/Florence-2-large: Fast with better quality\n'
-            'microsoft/Phi-3-vision: High quality, medium speed\n'
-            'llava-hf/llava-v1.6-vicuna-7b-hf: Highest quality but slowest')
-        desc_model_form.addRow('Description model', self.mpt_desc_model_combo)
+            'VLM model for generating descriptions. Click (i) for detailed comparison.')
+
+        # Info button for VLM models
+        self.vlm_info_button = QPushButton('ⓘ')
+        self.vlm_info_button.setFixedSize(24, 24)
+        self.vlm_info_button.setToolTip('Show VLM model comparison')
+        self.vlm_info_button.clicked.connect(self.show_vlm_info_dialog)
+
+        # Container for VLM dropdown + info button
+        self.vlm_model_container = QWidget()
+        vlm_model_layout = QHBoxLayout(self.vlm_model_container)
+        vlm_model_layout.setContentsMargins(0, 0, 0, 0)
+        vlm_model_layout.setSpacing(4)
+        vlm_model_layout.addWidget(self.mpt_desc_model_combo, 1)
+        vlm_model_layout.addWidget(self.vlm_info_button)
+
+        # Scene context injection checkbox (for fine-tune mode)
+        self.inject_scene_context_check_box = SettingsBigCheckBox(
+            key='inject_scene_context',
+            default=False)
+        self.inject_scene_context_check_box.setToolTip(
+            'Inject scene description into person prompts to help ground spatial context.\n'
+            'OFF: Cleaner individual descriptions (recommended)\n'
+            'ON: May help with spatial awareness but can cause "two people" references')
 
         # Enhancement mode selector (for fine-tune caption mode)
-        enhancement_mode_form = QFormLayout()
-        enhancement_mode_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        enhancement_mode_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mpt_enhancement_mode_combo = FocusedScrollSettingsComboBox(
             key='enhancement_mode')
-        self.mpt_enhancement_mode_combo.addItems(['standard', 'enhanced'])
-        self.mpt_enhancement_mode_combo.setCurrentText('standard')
+        self.mpt_enhancement_mode_combo.addItems(['VLM Only', 'VLM + LLM Fusion'])
         self.mpt_enhancement_mode_combo.setToolTip(
-            'Standard: VLM descriptions only with scene masking (VRAM-efficient)\n'
-            'Enhanced: VLM + LLM fusion for better detail coverage (requires more VRAM)')
-        enhancement_mode_form.addRow('Enhancement mode', self.mpt_enhancement_mode_combo)
+            'VLM Only: VLM descriptions with scene masking (VRAM-efficient)\n'
+            'VLM + LLM Fusion: VLM descriptions enhanced by LLM for better detail coverage (requires more VRAM)')
 
         # LLM model selector (for enhanced mode)
-        llm_model_form = QFormLayout()
-        llm_model_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        llm_model_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mpt_llm_model_combo = FocusedScrollSettingsComboBox(
             key='llm_model_name')
-        self.mpt_llm_model_combo.addItems([
-            'Qwen/Qwen2.5-1.5B-Instruct',
-            'google/gemma-2-2b-it',
-            'microsoft/Phi-3.5-mini-instruct',
-            'Qwen/Qwen2.5-7B-Instruct',
-            'meta-llama/Llama-3.1-8B-Instruct',
-        ])
-        self.mpt_llm_model_combo.setCurrentText('Qwen/Qwen2.5-1.5B-Instruct')
+        # Add LLM models from the info list
+        self.mpt_llm_model_combo.addItems([m['id'] for m in LLM_MODEL_INFO])
         self.mpt_llm_model_combo.setToolTip(
-            'LLM model for caption enhancement.\n\n'
-            'LIGHTWEIGHT (Standard Enhancement):\n'
-            '• Qwen/Qwen2.5-1.5B-Instruct: Recommended lightweight (~1GB VRAM quantised)\n'
-            '• google/gemma-2-2b-it: Also very lightweight (~1-2GB VRAM quantised)\n\n'
-            'STANDARD:\n'
-            '• microsoft/Phi-3.5-mini-instruct: Fast, good quality (~2GB VRAM quantised)\n\n'
-            'HIGH QUALITY (Advanced):\n'
-            '• Qwen/Qwen2.5-7B-Instruct: Excellent quality (~4GB VRAM quantised)\n'
-            '• meta-llama/Llama-3.1-8B-Instruct: Strong quality (~5GB VRAM quantised)')
-        llm_model_form.addRow('LLM model', self.mpt_llm_model_combo)
+            'LLM model for caption enhancement. Click (i) for detailed comparison.')
+
+        # Info button for LLM models
+        self.llm_info_button = QPushButton('ⓘ')
+        self.llm_info_button.setFixedSize(24, 24)
+        self.llm_info_button.setToolTip('Show LLM model comparison')
+        self.llm_info_button.clicked.connect(self.show_llm_info_dialog)
+
+        # Container for LLM dropdown + info button
+        self.llm_model_container = QWidget()
+        llm_model_layout = QHBoxLayout(self.llm_model_container)
+        llm_model_layout.setContentsMargins(0, 0, 0, 0)
+        llm_model_layout.setSpacing(4)
+        llm_model_layout.addWidget(self.mpt_llm_model_combo, 1)
+        llm_model_layout.addWidget(self.llm_info_button)
 
         # LLM quantisation checkbox
         self.mpt_llm_quantize_check_box = SettingsBigCheckBox(
@@ -3570,39 +3773,114 @@ class CaptionSettingsForm(QVBoxLayout):
             '0.5 (50%): Enhance more aggressively\n'
             '1.0 (100%): Always enhance')
 
+        # LLM generation parameters
+        self.mpt_llm_temperature_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='llm_temperature',
+            default=0.3,
+            minimum=0.01,
+            maximum=2.0)
+        self.mpt_llm_temperature_spin_box.setSingleStep(0.05)
+        self.mpt_llm_temperature_spin_box.setDecimals(2)
+        self.mpt_llm_temperature_spin_box.setToolTip(
+            'Controls randomness in LLM output.\n'
+            '0.1-0.3: More focused and deterministic (recommended for captions)\n'
+            '0.5-0.7: Balanced creativity\n'
+            '0.8-1.0+: More creative and varied')
+
+        self.mpt_llm_top_p_spin_box = FocusedScrollSettingsDoubleSpinBox(
+            key='llm_top_p',
+            default=0.9,
+            minimum=0.0,
+            maximum=1.0)
+        self.mpt_llm_top_p_spin_box.setSingleStep(0.05)
+        self.mpt_llm_top_p_spin_box.setDecimals(2)
+        self.mpt_llm_top_p_spin_box.setToolTip(
+            'Nucleus sampling - limits token selection to top probability mass.\n'
+            '0.9: Standard setting, good balance\n'
+            '0.95: Slightly more varied output\n'
+            '1.0: No filtering (uses full vocabulary)')
+
+        self.mpt_llm_max_tokens_spin_box = FocusedScrollSettingsSpinBox(
+            key='llm_max_tokens',
+            default=75,
+            minimum=10,
+            maximum=500)
+        self.mpt_llm_max_tokens_spin_box.setToolTip(
+            'Maximum tokens to generate for enhanced captions.\n'
+            '50-75: Concise captions\n'
+            '100-150: More detailed descriptions\n'
+            '200+: Very detailed output')
+
         # Masking strategy selector
-        masking_strategy_form = QFormLayout()
-        masking_strategy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        masking_strategy_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.mpt_masking_strategy_combo = FocusedScrollSettingsComboBox(
-            key='masking_strategy')
-        self.mpt_masking_strategy_combo.addItems(['median', 'blur'])
-        self.mpt_masking_strategy_combo.setCurrentText('median')
+            key='masking_strategy', default='Median')
+        self.mpt_masking_strategy_combo.addItems(['None', 'Median', 'Blur'])
         self.mpt_masking_strategy_combo.setToolTip(
             'Strategy for masking people from scene descriptions.\n'
+            'None: No masking - VLM sees full image including people\n'
             'Median: Fill person regions with background median colour\n'
-            'Blur: Blur person regions (preserves more context)')
-        masking_strategy_form.addRow('Scene masking', self.mpt_masking_strategy_combo)
+            'Blur: Blur person regions (preserves more context)\n\n'
+            'Uses segmentation masks when available for precise masking.')
+
+        # Scene tags mode selector (for Tags to Caption mode)
+        self.mpt_scene_tags_mode_combo = FocusedScrollSettingsComboBox(
+            key='scene_tags_mode', default='Filtered')
+        self.mpt_scene_tags_mode_combo.addItems(['Filtered', 'All'])
+        self.mpt_scene_tags_mode_combo.setToolTip(
+            'How to extract scene tags for caption generation.\n'
+            'Filtered: Use SceneExtractor to get only scene-related tags (backgrounds, locations, etc.)\n'
+            'All: Use all WD tags from full image (may include some person-related tags)')
 
         # Enable/disable controls based on modes
         def on_caption_mode_changed():
-            is_fine_tune = self.mpt_caption_mode_combo.currentText() == 'fine_tune_caption'
+            current_mode = self.mpt_caption_mode_combo.currentText()
+            is_fine_tune = current_mode == 'Fine-Tune Caption'
+            is_tags_to_caption = current_mode == 'Tags to Caption'
+
+            # VLM controls: only for Fine-Tune Caption mode
             self.mpt_desc_model_combo.setEnabled(is_fine_tune)
+            self.vlm_info_button.setEnabled(is_fine_tune)
+            self.inject_scene_context_check_box.setEnabled(is_fine_tune)
+
+            # Enhancement mode: only for Fine-Tune Caption mode
             self.mpt_enhancement_mode_combo.setEnabled(is_fine_tune)
-            self.mpt_masking_strategy_combo.setEnabled(is_fine_tune)
-            on_enhancement_mode_changed()  # Update enhancement-specific controls
+
+            # Scene tags mode: only for Tags to Caption mode
+            self.mpt_scene_tags_mode_combo.setEnabled(is_tags_to_caption)
+
+            on_enhancement_mode_changed()  # Update LLM controls
+            on_include_scene_tags_changed()  # Update scene masking state
 
         def on_enhancement_mode_changed():
-            is_fine_tune = self.mpt_caption_mode_combo.currentText() == 'fine_tune_caption'
-            is_enhanced = self.mpt_enhancement_mode_combo.currentText() == 'enhanced'
-            show_llm_controls = is_fine_tune and is_enhanced
+            current_mode = self.mpt_caption_mode_combo.currentText()
+            is_fine_tune = current_mode == 'Fine-Tune Caption'
+            is_tags_to_caption = current_mode == 'Tags to Caption'
+            is_enhanced = self.mpt_enhancement_mode_combo.currentText() == 'VLM + LLM Fusion'
+
+            # LLM controls: for Tags to Caption mode OR Fine-Tune with VLM + LLM Fusion
+            show_llm_controls = is_tags_to_caption or (is_fine_tune and is_enhanced)
             self.mpt_llm_model_combo.setEnabled(show_llm_controls)
+            self.llm_info_button.setEnabled(show_llm_controls)
             self.mpt_llm_quantize_check_box.setEnabled(show_llm_controls)
-            self.mpt_enhancement_threshold_spin_box.setEnabled(show_llm_controls)
+            self.mpt_llm_temperature_spin_box.setEnabled(show_llm_controls)
+            self.mpt_llm_top_p_spin_box.setEnabled(show_llm_controls)
+            self.mpt_llm_max_tokens_spin_box.setEnabled(show_llm_controls)
+
+            # Enhancement threshold: only for Fine-Tune with VLM + LLM Fusion
+            # (Tags to Caption always converts all tags, no threshold needed)
+            self.mpt_enhancement_threshold_spin_box.setEnabled(is_fine_tune and is_enhanced)
+
+        def on_include_scene_tags_changed():
+            current_mode = self.mpt_caption_mode_combo.currentText()
+            is_fine_tune = current_mode == 'Fine-Tune Caption'
+            include_scene = self.include_scene_tags_check_box.isChecked()
+            # Scene masking only available in fine-tune mode AND when include scene tags is on
+            self.mpt_masking_strategy_combo.setEnabled(is_fine_tune and include_scene)
 
         self.mpt_caption_mode_combo.currentTextChanged.connect(on_caption_mode_changed)
         self.mpt_enhancement_mode_combo.currentTextChanged.connect(on_enhancement_mode_changed)
+        self.include_scene_tags_check_box.stateChanged.connect(
+            lambda: on_include_scene_tags_changed())
         on_caption_mode_changed()  # Initial state
 
         # Preview detection button
@@ -3632,17 +3910,34 @@ class CaptionSettingsForm(QVBoxLayout):
         multi_person_settings_form.addRow('Maximum people',
                                           self.detection_max_people_spin_box)
         multi_person_settings_form.addRow(person_aliases_form)
-        multi_person_settings_form.addRow(caption_mode_form)
-        multi_person_settings_form.addRow(desc_model_form)
-        multi_person_settings_form.addRow(enhancement_mode_form)
-        multi_person_settings_form.addRow(llm_model_form)
-        multi_person_settings_form.addRow('Use 4-bit quantisation',
+        multi_person_settings_form.addRow('Caption mode',
+                                          self.mpt_caption_mode_combo)
+        multi_person_settings_form.addRow('VLM model',
+                                          self.vlm_model_container)
+        multi_person_settings_form.addRow('Inject scene context',
+                                          self.inject_scene_context_check_box)
+        # Scene controls (apply regardless of enhancement mode)
+        multi_person_settings_form.addRow('Include scene tags',
+                                          self.include_scene_tags_check_box)
+        multi_person_settings_form.addRow('Scene masking',
+                                          self.mpt_masking_strategy_combo)
+        multi_person_settings_form.addRow('Scene tags mode',
+                                          self.mpt_scene_tags_mode_combo)
+        # Enhancement controls
+        multi_person_settings_form.addRow('Enhancement mode',
+                                          self.mpt_enhancement_mode_combo)
+        multi_person_settings_form.addRow('LLM model',
+                                          self.llm_model_container)
+        multi_person_settings_form.addRow('4-bit quantisation',
                                           self.mpt_llm_quantize_check_box)
         multi_person_settings_form.addRow('Enhancement threshold',
                                           self.mpt_enhancement_threshold_spin_box)
-        multi_person_settings_form.addRow(masking_strategy_form)
-        multi_person_settings_form.addRow('Include scene tags',
-                                          self.include_scene_tags_check_box)
+        multi_person_settings_form.addRow('LLM temperature',
+                                          self.mpt_llm_temperature_spin_box)
+        multi_person_settings_form.addRow('LLM top-p',
+                                          self.mpt_llm_top_p_spin_box)
+        multi_person_settings_form.addRow('LLM max tokens',
+                                          self.mpt_llm_max_tokens_spin_box)
         multi_person_settings_form.addRow(self.preview_detection_button)
         multi_person_settings_form.addRow(wd_model_form)
 
@@ -3905,8 +4200,6 @@ class CaptionSettingsForm(QVBoxLayout):
 
         # Common widgets for standard VLM models (not WD Tagger or MultiPerson)
         vlm_widgets = [
-            self.prompt_label,
-            self.prompt_text_edit,
             self.caption_start_label,
             self.caption_start_line_edit,
             self.device_label,
@@ -3962,10 +4255,25 @@ class CaptionSettingsForm(QVBoxLayout):
             self.toggle_advanced_mp_settings_button.setText(
                 'Show Advanced Settings')
 
+    def _get_prompt_for_model(self, model_id: str) -> str:
+        """Get the prompt for a model from settings."""
+        # Sanitise model_id for settings key
+        safe_model_id = model_id.replace('/', '_').replace('\\', '_')
+        key = f'prompt_{safe_model_id}'
+        saved_prompt = self.settings.value(key, None)
+
+        if saved_prompt is not None:
+            return saved_prompt
+        else:
+            # Use model's default prompt
+            model_class = get_model_class(model_id)
+            return model_class.get_default_prompt()
+
     def get_caption_settings(self) -> dict:
+        model_id = self.model_combo_box.currentText()
         return {
-            'model_id': self.model_combo_box.currentText(),
-            'prompt': self.prompt_text_edit.toPlainText(),
+            'model_id': model_id,
+            'prompt': self._get_prompt_for_model(model_id),
             'caption_start': self.caption_start_line_edit.text(),
             'caption_position': self.caption_position_combo_box.currentText(),
             'device': self.device_combo_box.currentText(),
@@ -4012,6 +4320,7 @@ class CaptionSettingsForm(QVBoxLayout):
             'person_aliases': self.person_aliases_line_edit.text(),
             'caption_mode': self.mpt_caption_mode_combo.currentText(),
             'description_model': self.mpt_desc_model_combo.currentText(),
+            'inject_scene_context': self.inject_scene_context_check_box.isChecked(),
             'wd_model': self.wd_model_combo_box.currentText(),
             'mp_wd_tagger_min_probability': self.mp_min_probability_spin_box.value(),
             'mp_wd_tagger_tags_to_exclude':
@@ -4021,12 +4330,28 @@ class CaptionSettingsForm(QVBoxLayout):
             'llm_model_name': self.mpt_llm_model_combo.currentText(),
             'llm_quantize': self.mpt_llm_quantize_check_box.isChecked(),
             'enhancement_threshold': self.mpt_enhancement_threshold_spin_box.value(),
+            'llm_temperature': self.mpt_llm_temperature_spin_box.value(),
+            'llm_top_p': self.mpt_llm_top_p_spin_box.value(),
+            'llm_max_tokens': self.mpt_llm_max_tokens_spin_box.value(),
             'masking_strategy': self.mpt_masking_strategy_combo.currentText(),
+            'scene_tags_mode': self.mpt_scene_tags_mode_combo.currentText(),
             # Experimental mask refinement
             'mask_erosion_size': self.mask_erosion_spin_box.value(),
             'mask_dilation_size': self.mask_dilation_spin_box.value(),
             'mask_blur_size': self.mask_blur_spin_box.value()
         }
+
+    def show_vlm_info_dialog(self):
+        """Show dialog with VLM model comparison table."""
+        dialog = ModelInfoDialog(
+            self.parentWidget(), VLM_MODEL_INFO, "VLM Model Comparison")
+        dialog.exec()
+
+    def show_llm_info_dialog(self):
+        """Show dialog with LLM model comparison table."""
+        dialog = ModelInfoDialog(
+            self.parentWidget(), LLM_MODEL_INFO, "LLM Model Comparison")
+        dialog.exec()
 
     def show_detection_preview(self):
         """Show the detection preview dialog."""
@@ -4270,6 +4595,8 @@ class AutoCaptioner(QDockWidget):
             self.caption_generated)
         self.captioning_thread.progress_bar_update_requested.connect(
             self.progress_bar.setValue)
+        self.captioning_thread.progress_bar_range_requested.connect(
+            lambda min_val, max_val: self.progress_bar.setRange(min_val, max_val))
         self.captioning_thread.error_occurred.connect(
             self.show_error_popup)
         self.captioning_thread.finished.connect(

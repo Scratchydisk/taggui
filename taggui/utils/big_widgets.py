@@ -24,6 +24,14 @@ class BigCheckBox(QCheckBox):
         font_size = settings.value(
             'font_size', defaultValue=DEFAULT_SETTINGS['font_size'], type=int)
         new_size = font_size * 1.5
-        self.setStyleSheet(
-            f'QCheckBox::indicator '
-            f'{{ width: {new_size}px; height: {new_size}px; }}')
+        self.setStyleSheet(f'''
+            QCheckBox::indicator {{ width: {new_size}px; height: {new_size}px; }}
+            QCheckBox:disabled {{ color: #808080; }}
+            QCheckBox::indicator:disabled {{
+                background-color: #e0e0e0;
+                border: 1px solid #a0a0a0;
+            }}
+            QCheckBox::indicator:disabled:checked {{
+                background-color: #a0a0a0;
+            }}
+        ''')

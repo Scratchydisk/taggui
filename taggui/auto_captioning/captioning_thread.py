@@ -60,6 +60,7 @@ class CaptioningThread(QThread):
     # output_type is 'tags' or 'caption' to indicate which file to save to.
     caption_generated = Signal(QModelIndex, str, list, str)
     progress_bar_update_requested = Signal(int)
+    progress_bar_range_requested = Signal(int, int)  # (min, max) for two-phase processing
     # Error signal for critical errors that need user notification (e.g., CUDA OOM)
     error_occurred = Signal(str, str)  # (title, message)
 
@@ -95,12 +96,33 @@ class CaptioningThread(QThread):
         self.clear_console_text_edit_requested.emit()
         selected_image_count = len(self.selected_image_indices)
         are_multiple_images_selected = selected_image_count > 1
+
+        # Set batch size for models that support batch processing
+        if hasattr(model, 'batch_size'):
+            model.batch_size = selected_image_count
+
+        # Check if model has two-phase processing (detection + enhancement)
+        has_finalize_batch = hasattr(model, 'finalize_batch')
+
+        # If two-phase, double the progress bar range
+        if has_finalize_batch and are_multiple_images_selected:
+            self.progress_bar_range_requested.emit(0, selected_image_count * 2)
+
         captioning_start_datetime = datetime.now()
         captioning_message = model.get_captioning_message(
             are_multiple_images_selected, captioning_start_datetime)
         print(captioning_message)
+        if has_finalize_batch and are_multiple_images_selected:
+            print('Phase 1: Generating descriptions...')
         caption_position = self.caption_settings['caption_position']
+
+        # Track image indices for batch finalization
+        batch_image_indices = []
+
         for i, image_index in enumerate(self.selected_image_indices):
+            # Update batch index for models that support it
+            if hasattr(model, 'batch_index'):
+                model.batch_index = i
             start_time = perf_counter()
             if self.is_canceled:
                 print('Canceled captioning.')
@@ -119,6 +141,10 @@ class CaptioningThread(QThread):
             tags = add_caption_to_tags(image.tags, caption, caption_position)
             output_type = getattr(model, 'output_type', 'caption')  # Default to 'caption' for backwards compatibility
             self.caption_generated.emit(image_index, caption, tags, output_type)
+
+            # Track for batch finalization
+            batch_image_indices.append(image_index)
+
             if are_multiple_images_selected:
                 self.progress_bar_update_requested.emit(i + 1)
             if i == 0 and not are_multiple_images_selected:
@@ -127,6 +153,28 @@ class CaptioningThread(QThread):
                 console_output_caption = caption
             print(f'{image.path.name} ({perf_counter() - start_time:.1f} s):\n'
                   f'{console_output_caption}')
+
+        # Finalize batch if model supports it (e.g., MultiPersonTagger with LLM enhancement)
+        if hasattr(model, 'finalize_batch') and are_multiple_images_selected:
+            if self.is_canceled:
+                print('Canceled before batch finalization.')
+                return
+            print('Phase 2: Enhancing descriptions...')
+            # Progress callback for second phase (offset by first phase count)
+            def enhancement_progress(current, total):
+                self.progress_bar_update_requested.emit(selected_image_count + current)
+            enhanced_captions = model.finalize_batch(progress_callback=enhancement_progress)
+            if enhanced_captions:
+                print(f'Enhanced {len(enhanced_captions)} captions.')
+                # Emit updated captions
+                for idx, enhanced_caption in enumerate(enhanced_captions):
+                    if idx < len(batch_image_indices):
+                        image_index = batch_image_indices[idx]
+                        image: Image = self.image_list_model.data(
+                            image_index, Qt.ItemDataRole.UserRole)
+                        tags = add_caption_to_tags(image.tags, enhanced_caption, caption_position)
+                        self.caption_generated.emit(image_index, enhanced_caption, tags, output_type)
+
         if are_multiple_images_selected:
             captioning_end_datetime = datetime.now()
             total_captioning_duration = ((captioning_end_datetime

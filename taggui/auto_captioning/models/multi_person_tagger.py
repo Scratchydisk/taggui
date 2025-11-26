@@ -6,9 +6,11 @@ using YOLOv8 for detection and WD Tagger for tagging.
 """
 
 import logging
+import os
 from datetime import datetime
 
 import numpy as np
+import torch
 from PIL import Image as PilImage
 
 import auto_captioning.captioning_thread as captioning_thread
@@ -23,6 +25,45 @@ from utils.settings import DEFAULT_SETTINGS, get_settings
 
 
 logger = logging.getLogger(__name__)
+
+# Default VLM prompts (used if not customised in settings)
+DEFAULT_VLM_PERSON_PROMPT = (
+    "Describe only what you can clearly see of this person in one sentence. "
+    "Focus on visible clothing, appearance, and pose. "
+    "Do not infer or imagine details that are not visible. "
+    "Do not include any text found in the image."
+)
+
+DEFAULT_VLM_SCENE_PROMPT = (
+    "Describe only the visible setting and background in one brief sentence. "
+    "Focus on what is actually visible: surfaces, objects, lighting. "
+    "Do not describe people or infer details you cannot see. "
+    "Do not include any text found in the image."
+)
+
+# Default prompt for Tags to Caption mode (LLM converts WD tags to natural caption)
+DEFAULT_TAGS_TO_CAPTION_PROMPT = """Write a natural 20-30 word description of this person based on these visual attributes.
+
+Attributes: {tags}
+
+Rules:
+- Describe appearance, clothing, and visible features naturally
+- Be factual and direct - only describe what is indicated by the tags
+- No metaphors or flowery language
+- One or two sentences only
+
+Description:"""
+
+DEFAULT_SCENE_TAGS_TO_CAPTION_PROMPT = """Write a brief 10-15 word description of the scene/setting based on these attributes.
+
+Attributes: {tags}
+
+Rules:
+- Describe the environment and background naturally
+- Be factual and direct
+- One sentence only
+
+Description:"""
 
 
 class MultiPersonTagger(AutoCaptioningModel):
@@ -69,16 +110,25 @@ class MultiPersonTagger(AutoCaptioningModel):
         else:
             self.person_aliases = []
 
-        # Caption mode: 'lora_tags' or 'fine_tune_caption'
-        self.caption_mode = caption_settings.get('caption_mode', 'lora_tags')
+        # Caption mode: 'LoRA Tags', 'Fine-Tune Caption', or 'Tags to Caption'
+        self.caption_mode = caption_settings.get('caption_mode', 'LoRA Tags')
         self.description_model_name = caption_settings.get('description_model', 'vikhyatk/moondream2')
+        self.inject_scene_context = caption_settings.get('inject_scene_context', False)
+
+        # Tags to Caption mode settings
+        # Scene tags mode: 'Filtered' (use SceneExtractor) or 'All' (all non-person tags)
+        self.scene_tags_mode = caption_settings.get('scene_tags_mode', 'Filtered')
+        logger.info(f"Scene tags mode: {self.scene_tags_mode}")
 
         # Enhancement settings (for fine-tune caption mode)
-        self.enhancement_mode = caption_settings.get('enhancement_mode', 'standard')  # 'standard' or 'enhanced'
+        self.enhancement_mode = caption_settings.get('enhancement_mode', 'VLM Only')  # 'VLM Only' or 'VLM + LLM Fusion'
         self.llm_model_name = caption_settings.get('llm_model_name', 'Qwen/Qwen2.5-1.5B-Instruct')  # Lightweight default
         self.llm_quantize = caption_settings.get('llm_quantize', True)
         self.enhancement_threshold = caption_settings.get('enhancement_threshold', 0.8)
-        self.masking_strategy = caption_settings.get('masking_strategy', 'median')  # 'median' or 'blur'
+        self.llm_temperature = caption_settings.get('llm_temperature', 0.3)
+        self.llm_top_p = caption_settings.get('llm_top_p', 0.9)
+        self.llm_max_tokens = caption_settings.get('llm_max_tokens', 75)
+        self.masking_strategy = caption_settings.get('masking_strategy', 'Median')  # 'Median' or 'Blur'
         self.show_debug_masks = caption_settings.get('show_debug_masks', False)
 
         # WD Tagger settings (construct from mp_ prefixed settings)
@@ -97,6 +147,11 @@ class MultiPersonTagger(AutoCaptioningModel):
         self.description_model = None  # Lazy-loaded VLM for fine-tune captions
         self.image_masker = None  # For scene masking
         self.caption_enhancer = None  # For LLM enhancement (enhanced mode only)
+
+        # Batch processing state (for efficient multi-image processing)
+        self.batch_size = 1  # Set by captioning thread
+        self.batch_index = 0  # Current image index in batch
+        self.pending_enhancements = []  # [(image_index, person_descriptions, scene_desc, vlm_results)]
 
         # Set output type - both modes produce structured multi-line output
         # that should be saved to .caption.txt to preserve structure
@@ -281,19 +336,32 @@ class MultiPersonTagger(AutoCaptioningModel):
         logger.info("SceneExtractor loaded")
 
         # Initialize ImageMasker (for scene masking in fine-tune mode)
-        if self.caption_mode == 'fine_tune_caption':
-            self.image_masker = ImageMasker(strategy=self.masking_strategy)
-            logger.info(f"ImageMasker loaded (strategy: {self.masking_strategy})")
+        if self.caption_mode == 'Fine-Tune Caption':
+            # Convert human-readable strategy to lowercase for ImageMasker
+            strategy = self.masking_strategy.lower()
+            if strategy != 'none':
+                self.image_masker = ImageMasker(strategy=strategy)
+                logger.info(f"ImageMasker loaded (strategy: {strategy})")
+            else:
+                logger.info("Scene masking disabled (strategy: none)")
 
-        # Initialize CaptionEnhancer (for enhanced mode only)
-        if self.caption_mode == 'fine_tune_caption' and self.enhancement_mode == 'enhanced':
+        # Initialize CaptionEnhancer (for enhanced mode or Tags to Caption mode)
+        needs_caption_enhancer = (
+            (self.caption_mode == 'Fine-Tune Caption' and self.enhancement_mode == 'VLM + LLM Fusion') or
+            self.caption_mode == 'Tags to Caption'
+        )
+        if needs_caption_enhancer:
             try:
                 self.caption_enhancer = CaptionEnhancer(
                     model_name=self.llm_model_name,
                     device=str(self.device),
-                    quantize=self.llm_quantize
+                    quantize=self.llm_quantize,
+                    temperature=self.llm_temperature,
+                    top_p=self.llm_top_p,
+                    max_new_tokens=self.llm_max_tokens
                 )
-                logger.info(f"CaptionEnhancer initialized (model: {self.llm_model_name}, quantize: {self.llm_quantize})")
+                logger.info(f"CaptionEnhancer initialized (model: {self.llm_model_name}, quantize: {self.llm_quantize}, "
+                            f"temperature: {self.llm_temperature}, top_p: {self.llm_top_p}, max_tokens: {self.llm_max_tokens})")
             except Exception as e:
                 logger.error(f"Failed to initialize CaptionEnhancer: {e}")
                 self.caption_enhancer = None
@@ -347,6 +415,103 @@ class MultiPersonTagger(AutoCaptioningModel):
         """
         pil_image = self.load_image(image)
         return pil_image
+
+    def _load_detections_from_cache(self, image_path) -> list | None:
+        """
+        Load full detections from cached .masks.npz file, skipping YOLO detection entirely.
+
+        This is called BEFORE running detection to check if we can use cached results.
+        If a valid masks file exists with complete detection data, we reconstruct
+        the detections from it rather than running YOLO again.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            List of detection dictionaries if cache hit, None if cache miss
+        """
+        from pathlib import Path
+
+        # Check for sidecar file
+        mask_file_path = Path(image_path).with_suffix(Path(image_path).suffix + '.masks.npz')
+
+        if not mask_file_path.exists():
+            return None
+
+        try:
+            # Load mask data
+            mask_data = np.load(mask_file_path, allow_pickle=True)
+
+            # Determine how many people are saved
+            saved_person_count = 0
+            for key in mask_data.keys():
+                if key.startswith('person_') and key.endswith('_bbox'):
+                    person_num = int(key.split('_')[1])
+                    saved_person_count = max(saved_person_count, person_num + 1)
+
+            if saved_person_count == 0:
+                logger.debug(f"No cached detections found in {mask_file_path.name}")
+                return None
+
+            # Reconstruct all detections from saved data
+            detections = []
+            for i in range(saved_person_count):
+                person_key = f'person_{i}_mask'
+                bbox_key = f'person_{i}_bbox'
+                enabled_key = f'person_{i}_enabled'
+                alias_key = f'person_{i}_alias'
+
+                # Check if this person has required data (bbox is required, mask is optional)
+                if bbox_key not in mask_data:
+                    logger.warning(f"Skipping cached person {i+1}: missing bbox data")
+                    continue
+
+                # Load bbox and calculate derived properties
+                saved_bbox = mask_data[bbox_key]
+                x1, y1, x2, y2 = saved_bbox
+                bbox_width = x2 - x1
+                bbox_height = y2 - y1
+                area = bbox_width * bbox_height
+                center_y = (y1 + y2) // 2
+
+                # Load mask if present
+                mask = mask_data[person_key] if person_key in mask_data else None
+
+                # Load enabled state (default True)
+                enabled = True
+                if enabled_key in mask_data:
+                    enabled_value = mask_data[enabled_key][0]
+                    enabled = bool(enabled_value)
+
+                # Load alias (default empty)
+                alias = ''
+                if alias_key in mask_data:
+                    alias_value = mask_data[alias_key][0]
+                    alias = str(alias_value) if alias_value else ''
+
+                # Create detection
+                detection = {
+                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                    'confidence': 1.0,  # Cached, so confidence is 1.0
+                    'area': int(area),
+                    'center_y': int(center_y),
+                    'mask': mask,
+                    'enabled': enabled,
+                    'alias': alias
+                }
+
+                detections.append(detection)
+
+            if detections:
+                logger.info(f"Loaded {len(detections)} cached detection(s) from {mask_file_path.name} (skipping YOLO)")
+                return detections
+            else:
+                logger.debug(f"No valid detections found in {mask_file_path.name}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"Failed to load cached detections from {mask_file_path}: {e}")
+            return None
 
     def _load_edited_masks(self, image_path, detections: list) -> bool:
         """
@@ -866,42 +1031,48 @@ class MultiPersonTagger(AutoCaptioningModel):
                 pil_image.save(temp_path)
 
         try:
-            # Step 1: Detect people (with iterative detection if split_merged_people enabled)
-            if self.split_merged_people:
-                # Tag full image to get expected person count
-                logger.info("Split merged people enabled: tagging full image to get expected count")
-                image_array = self._preprocess_image_for_wd_tagger(pil_image)
-                full_image_tags, _ = self.wd_model.generate_tags(
-                    image_array,
-                    self.wd_tagger_settings
-                )
+            # Step 1: Try to load detections from cache first (skip YOLO if cached)
+            detections = None
+            if image and hasattr(image, 'path'):
+                detections = self._load_detections_from_cache(image.path)
 
-                expected_person_count = self.parse_person_count_from_tags(full_image_tags)
-                logger.info(f"Expected people: {expected_person_count}")
+            # Step 2: If no cache, run YOLO detection
+            if detections is None:
+                if self.split_merged_people:
+                    # Tag full image to get expected person count
+                    logger.info("Split merged people enabled: tagging full image to get expected count")
+                    image_array = self._preprocess_image_for_wd_tagger(pil_image)
+                    full_image_tags, _ = self.wd_model.generate_tags(
+                        image_array,
+                        self.wd_tagger_settings
+                    )
 
-                # Use iterative detection if we expect multiple people
-                if expected_person_count > 0:
-                    detections, initial_count = self.person_detector.detect_people_iteratively(
-                        str(temp_path),
-                        expected_person_count,
-                        max_iterations=3
-                    )
-                    logger.info(
-                        f"Iterative detection: found {len(detections)} people "
-                        f"(initial: {initial_count}, expected: {expected_person_count})"
-                    )
+                    expected_person_count = self.parse_person_count_from_tags(full_image_tags)
+                    logger.info(f"Expected people: {expected_person_count}")
+
+                    # Use iterative detection if we expect multiple people
+                    if expected_person_count > 0:
+                        detections, initial_count = self.person_detector.detect_people_iteratively(
+                            str(temp_path),
+                            expected_person_count,
+                            max_iterations=3
+                        )
+                        logger.info(
+                            f"Iterative detection: found {len(detections)} people "
+                            f"(initial: {initial_count}, expected: {expected_person_count})"
+                        )
+                    else:
+                        # No expected people, use standard detection
+                        detections = self.person_detector.detect_people(str(temp_path))
                 else:
-                    # No expected people, use standard detection
+                    # Standard detection (no splitting)
                     detections = self.person_detector.detect_people(str(temp_path))
-            else:
-                # Standard detection (no splitting)
-                detections = self.person_detector.detect_people(str(temp_path))
 
-            # Load edited masks from sidecar file if available
-            if detections and image and hasattr(image, 'path'):
-                self._load_edited_masks(image.path, detections)
+                # Load edited masks from sidecar file if available (only after fresh detection)
+                if detections and image and hasattr(image, 'path'):
+                    self._load_edited_masks(image.path, detections)
 
-            # Step 2: If no people detected, fall back to standard WD Tagger
+            # Step 3: If no people detected, fall back to standard WD Tagger
             if not detections:
                 logger.info("No people detected, using standard WD Tagger")
                 image_array = self._preprocess_image_for_wd_tagger(pil_image)
@@ -914,14 +1085,19 @@ class MultiPersonTagger(AutoCaptioningModel):
 
             # Branch based on caption mode
             logger.info(f"Caption mode: {self.caption_mode}")
-            if self.caption_mode == 'fine_tune_caption':
+            if self.caption_mode == 'Fine-Tune Caption':
                 # Fine-tune mode: Generate VLM descriptions
                 logger.info("Entering fine-tune caption mode")
                 caption = self._generate_fine_tune_caption(pil_image, detections)
                 return caption, caption
+            elif self.caption_mode == 'Tags to Caption':
+                # Tags to Caption mode: WD tags → LLM → natural language
+                logger.info("Entering tags to caption mode")
+                caption = self._generate_tags_to_caption(pil_image, detections)
+                return caption, caption
 
             # LoRA mode: Continue with tag generation
-            # Step 3: Tag each detected person (skip disabled ones)
+            # Step 4: Tag each detected person (skip disabled ones)
             person_tags_list = []
             person_aliases = []  # Track aliases for enabled people
             enabled_person_index = 0  # Counter for enabled people only
@@ -1002,7 +1178,7 @@ class MultiPersonTagger(AutoCaptioningModel):
                     # Skip this person, continue with others
                     person_tags_list.append([])
 
-            # Step 4: Tag full image and extract scene tags
+            # Step 5: Tag full image and extract scene tags
             scene_tags = []
             if self.include_scene_tags:
                 try:
@@ -1025,7 +1201,7 @@ class MultiPersonTagger(AutoCaptioningModel):
                     logger.error(f"Error extracting scene tags: {e}")
                     scene_tags = []
 
-            # Step 5: Format output (with person aliases)
+            # Step 6: Format output (with person aliases)
             caption = self._format_output(person_tags_list, scene_tags, person_aliases)
             return caption, caption
 
@@ -1132,6 +1308,30 @@ class MultiPersonTagger(AutoCaptioningModel):
             logger.error(f"Failed to load description model {self.description_model_name}: {e}")
             raise
 
+    def _unload_description_model(self):
+        """Unload the VLM model to free VRAM for other models."""
+        if self.description_model is None:
+            return
+
+        logger.info("Unloading description model to free VRAM...")
+        try:
+            # Delete the model and its components
+            if hasattr(self.description_model, 'model') and self.description_model.model is not None:
+                del self.description_model.model
+            if hasattr(self.description_model, 'processor') and self.description_model.processor is not None:
+                del self.description_model.processor
+            del self.description_model
+            self.description_model = None
+
+            # Clear CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("CUDA cache cleared")
+
+            logger.info("Description model unloaded")
+        except Exception as e:
+            logger.warning(f"Error unloading description model: {e}")
+
     @staticmethod
     def clean_vlm_output(description: str, prompt: str = '') -> str:
         """
@@ -1185,6 +1385,75 @@ class MultiPersonTagger(AutoCaptioningModel):
 
         return description
 
+    def _generate_setting_description(
+        self,
+        pil_image: PilImage.Image,
+        detections: list[dict] = None
+    ) -> str:
+        """
+        Generate a setting-only description (no people) for spatial context.
+
+        Uses the same masked image as scene description but with a stricter prompt.
+
+        Args:
+            pil_image: Full PIL image
+            detections: Person detections for masking
+
+        Returns:
+            Brief setting description without people mentions
+        """
+        self._load_description_model()
+
+        # Apply person masking if available
+        scene_image = pil_image
+        if self.image_masker is not None and detections:
+            enabled_detections = [d for d in detections if d.get('enabled', True)]
+            bboxes = [d['bbox'] for d in enabled_detections]
+            masks = [d.get('mask') for d in enabled_detections]
+            if bboxes:
+                scene_image = self.image_masker.mask_persons(pil_image, bboxes, masks)
+
+        from utils.image import Image
+        import tempfile
+        from pathlib import Path
+        import os
+
+        tmp_fd, tmp_name = tempfile.mkstemp(suffix='.png')
+        os.close(tmp_fd)
+        tmp_path = Path(tmp_name)
+
+        try:
+            scene_image.save(tmp_path)
+            temp_image = Image(path=tmp_path, dimensions=scene_image.size)
+            temp_image.image = scene_image
+
+            # Prompt for setting description without people
+            setting_prompt = (
+                "Briefly describe the physical setting and key objects in this image. "
+                "Include vehicles, furniture, location, and background. "
+                "Do not mention or describe any people. Keep it under 15 words."
+            )
+
+            formatted_prompt = self.description_model.format_prompt(setting_prompt)
+            model_inputs = self.description_model.get_model_inputs(formatted_prompt, temp_image)
+            result, _ = self.description_model.generate_caption(
+                model_inputs=model_inputs,
+                image_prompt=formatted_prompt,
+                image=temp_image
+            )
+
+            result = self.clean_vlm_output(result, formatted_prompt)
+            logger.info(f"Setting description: {result}")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Failed to generate setting description: {e}")
+            return ""
+
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
     @staticmethod
     def detect_gender_from_tags(tags: list[str]) -> str:
         """
@@ -1219,23 +1488,28 @@ class MultiPersonTagger(AutoCaptioningModel):
         self,
         pil_image: PilImage.Image,
         detection: dict,
-        person_index: int
-    ) -> str:
+        person_index: int,
+        skip_enhancement: bool = False,
+        scene_context: str = ""
+    ) -> tuple[str, list, float, list] | str:
         """
         Generate natural language description of a person region using VLM.
 
         In enhanced mode, also:
         1. Gets WD tags for coverage analysis
         2. Analyzes VLM description against tags
-        3. Enhances with LLM if coverage is below threshold
+        3. Enhances with LLM if coverage is below threshold (unless skip_enhancement=True)
 
         Args:
             pil_image: Full PIL image
             detection: Detection dict with 'bbox' and optional 'mask'
             person_index: Index of person (for logging)
+            skip_enhancement: If True, skip LLM enhancement and return data for later enhancement
+            scene_context: Optional scene description to ground the person description spatially
 
         Returns:
-            Natural language description (15-35 words), potentially enhanced
+            If skip_enhancement=False: Natural language description (str)
+            If skip_enhancement=True: Tuple of (description, person_tags, coverage, missing_tags)
         """
         # Ensure description model is loaded
         self._load_description_model()
@@ -1253,13 +1527,25 @@ class MultiPersonTagger(AutoCaptioningModel):
         tmp_path = Path(tmp_name)
 
         try:
-            # Crop to person region
+            # Extract person region - use segmentation mask if available for cleaner isolation
             bbox = detection['bbox']
-            cropped = self.person_detector.crop_person(
-                pil_image,
-                bbox,
-                padding=self.crop_padding
-            )
+
+            if detection.get('mask') is not None:
+                # Use segmentation mask to extract ONLY this person's pixels
+                cropped = self._extract_segmented_person(
+                    pil_image,
+                    detection,
+                    padding=self.crop_padding
+                )
+                logger.debug(f"Person {person_index + 1}: Using segmentation mask for extraction")
+            else:
+                # Fall back to bbox crop if no mask available
+                logger.debug(f"Person {person_index + 1}: No mask available, using bbox crop")
+                cropped = self.person_detector.crop_person(
+                    pil_image,
+                    bbox,
+                    padding=self.crop_padding
+                )
 
             # Get WD tags if in enhanced mode (for coverage analysis)
             person_tags = []
@@ -1276,16 +1562,30 @@ class MultiPersonTagger(AutoCaptioningModel):
             # Save cropped region to temp file
             cropped.save(tmp_path)
 
+            # Debug: Save cropped image for verification (in development mode)
+            if os.getenv('TAGGUI_ENVIRONMENT') == 'development':
+                debug_path = tmp_path.parent / f'debug_person_{person_index + 1}_crop.png'
+                cropped.save(debug_path)
+                logger.info(f"DEBUG: Saved person {person_index + 1} crop to {debug_path}")
+                logger.info(f"DEBUG: Bbox={bbox}, Original size={pil_image.size}, Cropped size={cropped.size}")
+
             # Create Image object wrapper with dimensions
             temp_image = Image(path=tmp_path, dimensions=cropped.size)
             temp_image.image = cropped  # Set the PIL image directly
 
-            # Craft prompt for VLM
-            base_prompt = (
-                "Describe only what you can clearly see of this person in one sentence. "
-                "Focus on visible clothing, appearance, and pose. "
-                "Do not infer or imagine details that are not visible."
+            # Get VLM prompt from settings (or use default)
+            settings = get_settings()
+            base_prompt = settings.value(
+                'vlm_prompt_person',
+                DEFAULT_VLM_PERSON_PROMPT,
+                type=str
             )
+
+            # Prepend scene context if available and enabled (helps ground spatial descriptions)
+            # scene_context should already be people-free (rewritten in _generate_fine_tune_caption)
+            if scene_context and self.inject_scene_context:
+                base_prompt = f"Setting: {scene_context}\n\n{base_prompt}"
+                logger.debug(f"Person {person_index + 1}: Added setting context: {scene_context}")
 
             # Apply model-specific prompt formatting (e.g., Phi-3 needs special tokens)
             image_prompt = self.description_model.format_prompt(base_prompt)
@@ -1294,7 +1594,18 @@ class MultiPersonTagger(AutoCaptioningModel):
             logger.debug(f"Base prompt: {base_prompt}")
             logger.debug(f"Formatted prompt: {image_prompt}")
             logger.debug(f"Temp image path: {tmp_path}")
+            logger.debug(f"temp_image.path: {temp_image.path}")
             logger.debug(f"Cropped image size: {cropped.size}")
+            logger.debug(f"Original image size: {pil_image.size}")
+            logger.debug(f"Bbox: {bbox}")
+
+            # Verify temp file was saved correctly
+            if os.getenv('TAGGUI_ENVIRONMENT') == 'development':
+                verify_img = PilImage.open(tmp_path)
+                logger.info(f"DEBUG: Temp file verification - size={verify_img.size}, mode={verify_img.mode}")
+                if verify_img.size == pil_image.size:
+                    logger.warning(f"DEBUG: WARNING! Temp file has same size as original - crop may have failed!")
+                verify_img.close()
 
             # Get model inputs (preprocessed by VLM's processor)
             # This handles model-specific formatting and preprocessing
@@ -1326,6 +1637,17 @@ class MultiPersonTagger(AutoCaptioningModel):
                     f"Person {person_index + 1}: Coverage={coverage:.2%}, "
                     f"Missing={len(missing_tags)} tags"
                 )
+
+                # Debug: Show detected tags, missing tags, and pre-enhanced description
+                if os.getenv('TAGGUI_ENVIRONMENT') == 'development':
+                    logger.info(f"Person {person_index + 1} detected tags: {person_tags}")
+                    logger.info(f"Person {person_index + 1} missing tags: {missing_tags}")
+                    logger.info(f"Person {person_index + 1} pre-enhanced description: {description}")
+
+                # If skip_enhancement, return data for later enhancement
+                if skip_enhancement:
+                    logger.debug(f"Person {person_index + 1}: Skipping enhancement (will be done later)")
+                    return (description, person_tags, coverage, missing_tags)
 
                 # Enhance if coverage is below threshold
                 if coverage < self.enhancement_threshold:
@@ -1371,6 +1693,10 @@ class MultiPersonTagger(AutoCaptioningModel):
                         logger.info("Falling back to VLM description")
                 else:
                     logger.debug(f"Person {person_index + 1}: Coverage sufficient, no enhancement needed")
+            elif skip_enhancement:
+                # No enhancer configured, but skip_enhancement was requested
+                # Return just the description (no enhancement data)
+                return description
 
             logger.debug(f"Person {person_index + 1} final description: {description}")
             return description
@@ -1409,11 +1735,14 @@ class MultiPersonTagger(AutoCaptioningModel):
         if self.image_masker is not None and detections:
             logger.debug(f"Applying {self.masking_strategy} masking to {len(detections)} person regions")
 
-            # Extract bounding boxes from detections
-            bboxes = [d['bbox'] for d in detections if d.get('enabled', True)]
+            # Extract bounding boxes and masks from enabled detections
+            enabled_detections = [d for d in detections if d.get('enabled', True)]
+            bboxes = [d['bbox'] for d in enabled_detections]
+            masks = [d.get('mask') for d in enabled_detections]
 
             if bboxes:
-                scene_image = self.image_masker.mask_persons(pil_image, bboxes)
+                # Pass masks to masker - it will use them if all are available
+                scene_image = self.image_masker.mask_persons(pil_image, bboxes, masks)
                 logger.debug("Scene masking applied successfully")
 
         # Create a temporary Image object for the VLM
@@ -1432,14 +1761,15 @@ class MultiPersonTagger(AutoCaptioningModel):
             scene_image.save(tmp_path)
 
             # Create Image object wrapper with dimensions
-            temp_image = Image(path=tmp_path, dimensions=pil_image.size)
-            temp_image.image = pil_image
+            temp_image = Image(path=tmp_path, dimensions=scene_image.size)
+            temp_image.image = scene_image
 
-            # Craft prompt for VLM
-            base_prompt = (
-                "Describe only the visible setting and background in one brief sentence. "
-                "Focus on what is actually visible: surfaces, objects, lighting. "
-                "Do not describe people or infer details you cannot see."
+            # Get VLM prompt from settings (or use default)
+            settings = get_settings()
+            base_prompt = settings.value(
+                'vlm_prompt_scene',
+                DEFAULT_VLM_SCENE_PROMPT,
+                type=str
             )
 
             # Apply model-specific prompt formatting (e.g., Phi-3 needs special tokens)
@@ -1450,25 +1780,25 @@ class MultiPersonTagger(AutoCaptioningModel):
             model_inputs = self.description_model.get_model_inputs(image_prompt, temp_image)
 
             # Generate description using VLM
-            logger.debug(f"Generating scene description with {self.description_model_name}...")
+            logger.info(f"Generating scene description with {self.description_model_name}...")
             description, _ = self.description_model.generate_caption(
                 model_inputs=model_inputs,
                 image_prompt=image_prompt,
                 image=temp_image
             )
-            logger.debug(f"Raw scene output: {description}")
+            logger.info(f"Raw scene output: {description}")
 
             # Clean up description
             description = self.clean_vlm_output(description, image_prompt)
-            logger.debug(f"Cleaned scene description: {description}")
-            logger.debug(f"Word count: {len(description.split())}")
+            logger.info(f"Cleaned scene description: {description}")
+            logger.info(f"Word count: {len(description.split())}")
 
-            # Only return if substantial description (filter out generic responses)
-            if len(description.split()) >= 3:
-                logger.debug(f"Scene description accepted: {description}")
+            # Only return if we have something (filter out empty responses)
+            if len(description.split()) >= 1:
+                logger.info(f"Scene description accepted: {description}")
                 return description
 
-            logger.debug(f"Scene description rejected (too short or empty)")
+            logger.info(f"Scene description rejected (empty)")
             return ""
 
         except Exception as e:
@@ -1605,27 +1935,387 @@ class MultiPersonTagger(AutoCaptioningModel):
             person_tags_list=person_tags_list if person_tags_list else None
         )
 
-        # Generate VLM description for each person
-        person_descriptions = []
+        # Generate scene description FIRST (to provide context for person descriptions)
+        scene_description = ""
+        setting_context = ""  # People-free version for person prompts
+        logger.info(f"Include scene tags: {self.include_scene_tags}")
+        if self.include_scene_tags:
+            logger.info(f"Generating scene description (masking strategy: {self.masking_strategy}, masker loaded: {self.image_masker is not None})")
+            scene_description = self.describe_scene(pil_image, detections=enabled_detections)
+            logger.info(f"Scene description result: '{scene_description[:50]}...' ({len(scene_description)} chars)" if scene_description else "Scene description result: empty")
+
+            # Generate a separate setting-only description (no people) for person prompts
+            # Only needed if inject_scene_context is enabled
+            if self.inject_scene_context:
+                setting_context = self._generate_setting_description(pil_image, detections=enabled_detections)
+                logger.info(f"Setting context (no people): '{setting_context}'")
+            else:
+                logger.info("Skipping setting context generation (inject_scene_context is False)")
+        else:
+            logger.info("Skipping scene description (include_scene_tags is False)")
+
+        # Phase 1: Generate ALL VLM descriptions (with scene context for grounding)
+        # This helps prevent CUDA OOM on smaller GPUs (8GB) by avoiding VLM + LLM loaded simultaneously
+        vlm_results = []  # List of (alias, description, person_tags, coverage, missing_tags) or (alias, description)
+        skip_enhancement = self.caption_enhancer is not None  # Only skip if we'll enhance later
+
+        logger.info(f"Phase 1: Generating VLM descriptions for {len(enabled_detections)} people (skip_enhancement={skip_enhancement})")
         for i, detection in enumerate(enabled_detections):
             alias = aliases[i]
 
-            # Generate natural language description
-            description = self.describe_person_region(
+            # Generate natural language description (may return tuple if skip_enhancement)
+            # Pass setting_context (people-free) to ground the description spatially
+            result = self.describe_person_region(
                 pil_image=pil_image,
                 detection=detection,
-                person_index=i
+                person_index=i,
+                skip_enhancement=skip_enhancement,
+                scene_context=setting_context
             )
 
-            person_descriptions.append((alias, description))
+            if isinstance(result, tuple):
+                # (description, person_tags, coverage, missing_tags)
+                vlm_results.append((alias, result[0], result[1], result[2], result[3]))
+            else:
+                # Just description string
+                vlm_results.append((alias, result, None, None, None))
 
-        # Generate scene description (with masking to avoid people contamination)
-        scene_description = ""
-        if self.include_scene_tags:
-            scene_description = self.describe_scene(pil_image, detections=enabled_detections)
+        # Phase 2: Enhancement handling
+        person_descriptions = []
+        is_batch_mode = self.batch_size > 1
+
+        if self.caption_enhancer is not None:
+            if is_batch_mode:
+                # Batch mode: Defer enhancement to finalize_batch()
+                # Store VLM results and return VLM-only caption for now
+                logger.info(f"Batch mode: Deferring enhancement (image {self.batch_index + 1}/{self.batch_size})")
+
+                # Build VLM-only person descriptions for immediate return
+                for alias, description, _, _, _ in vlm_results:
+                    person_descriptions.append((alias, description))
+
+                # Store data for later enhancement
+                self.pending_enhancements.append({
+                    'vlm_results': vlm_results,
+                    'scene_description': scene_description,
+                })
+            else:
+                # Single image mode: Do enhancement now
+                logger.info("Phase 2: Unloading VLM before LLM enhancement...")
+                self._unload_description_model()
+
+                # Enhance descriptions that need it
+                for i, (alias, description, person_tags, coverage, missing_tags) in enumerate(vlm_results):
+                    if person_tags is not None and coverage is not None and coverage < self.enhancement_threshold:
+                        logger.info(
+                            f"Person {i + 1}: Coverage {coverage:.2%} < {self.enhancement_threshold:.2%}, "
+                            "enhancing description..."
+                        )
+                        try:
+                            important_tags = self.caption_enhancer._filter_important_tags(person_tags)
+                            enhanced_description = self.caption_enhancer.enhance_description(
+                                original_desc=description,
+                                missing_tags=missing_tags,
+                                coverage=coverage,
+                                all_tags=important_tags
+                            )
+                            logger.info(f"Person {i + 1} enhanced: {enhanced_description}")
+                            description = enhanced_description
+                        except Exception as e:
+                            error_msg = str(e)
+                            logger.error(f"Enhancement failed for person {i + 1}: {error_msg}")
+                            if "CUDA out of memory" in error_msg:
+                                logger.warning("CUDA OOM during enhancement - falling back to VLM descriptions")
+                                break
+
+                    person_descriptions.append((alias, description))
+
+                # Add any remaining unprocessed descriptions (if we broke out early)
+                if len(person_descriptions) < len(vlm_results):
+                    for alias, description, _, _, _ in vlm_results[len(person_descriptions):]:
+                        person_descriptions.append((alias, description))
+        else:
+            # No enhancement mode - just use VLM descriptions directly
+            for alias, description, _, _, _ in vlm_results:
+                person_descriptions.append((alias, description))
 
         # Format output
         caption = self._format_fine_tune_output(person_descriptions, scene_description)
 
         logger.info(f"Generated fine-tune caption with {len(person_descriptions)} people")
         return caption
+
+    def _generate_tags_to_caption(
+        self,
+        pil_image: PilImage.Image,
+        detections: list[dict]
+    ) -> str:
+        """
+        Generate natural language caption from WD tags using LLM.
+
+        Pipeline:
+        1. Get WD tags for each person (same as LoRA Tags mode)
+        2. Get scene tags (filtered or all non-person)
+        3. Send tags to LLM to convert to natural language
+        4. Format output like Fine-Tune Caption mode
+
+        Args:
+            pil_image: PIL Image
+            detections: List of detection dicts
+
+        Returns:
+            Multi-line formatted caption:
+            sksA: [description]
+            sksB: [description]
+            Scene: [description]
+        """
+        logger.info(f"Generating tags-to-caption for {len(detections)} detected people")
+
+        if self.caption_enhancer is None:
+            logger.error("CaptionEnhancer not initialized for Tags to Caption mode")
+            return "[ERROR: LLM not configured for Tags to Caption mode]"
+
+        # Ensure LLM model is loaded before we start
+        try:
+            self.caption_enhancer.load_model()
+            logger.info("LLM model loaded for tag-to-caption conversion")
+        except Exception as e:
+            logger.error(f"Failed to load LLM model: {e}")
+            return f"[ERROR: Failed to load LLM model - {e}]"
+
+        # Filter to enabled detections only
+        enabled_detections = [d for d in detections if d.get('enabled', True)]
+
+        # Step 1: Get WD tags for each person (same logic as LoRA Tags mode)
+        person_tags_list = []
+        person_aliases = []
+        enabled_person_index = 0
+
+        for i, detection in enumerate(enabled_detections):
+            # Store alias for this person
+            detection_alias = detection.get('alias', '').strip()
+            if detection_alias:
+                person_aliases.append(detection_alias)
+            elif enabled_person_index < len(self.person_aliases):
+                person_aliases.append(self.person_aliases[enabled_person_index])
+            else:
+                person_aliases.append(f'person{enabled_person_index + 1}')
+
+            enabled_person_index += 1
+
+            try:
+                # Extract person using same logic as LoRA Tags mode
+                if self.masking_method == 'Segmentation' and detection.get('mask') is not None:
+                    cropped = self._extract_segmented_person(
+                        pil_image,
+                        detection,
+                        padding=self.crop_padding
+                    )
+                elif self.mask_overlapping_people and len(enabled_detections) > 1:
+                    image_to_crop = self._mask_overlapping_bboxes(
+                        pil_image,
+                        detection['bbox'],
+                        enabled_detections,
+                        i,
+                        self.crop_padding
+                    )
+                    cropped = self.person_detector.crop_person(
+                        image_to_crop,
+                        detection['bbox'],
+                        padding=self.crop_padding
+                    )
+                else:
+                    cropped = self.person_detector.crop_person(
+                        pil_image,
+                        detection['bbox'],
+                        padding=self.crop_padding
+                    )
+
+                # Preprocess crop for WD Tagger
+                crop_array = self._preprocess_image_for_wd_tagger(cropped)
+
+                # Generate tags for this person
+                tags, probabilities = self.wd_model.generate_tags(
+                    crop_array,
+                    self.wd_tagger_settings
+                )
+
+                person_tags = list(tags[:self.max_tags_per_person])
+                person_tags_list.append(person_tags)
+                logger.info(f"Person {i+1}: {len(person_tags)} tags: {person_tags[:10]}...")
+
+            except Exception as e:
+                logger.error(f"Error tagging person {i+1}: {e}")
+                person_tags_list.append([])
+
+        # Step 2: Get scene tags
+        scene_tags = []
+        if self.include_scene_tags:
+            try:
+                image_array = self._preprocess_image_for_wd_tagger(pil_image)
+                all_tags, all_probabilities = self.wd_model.generate_tags(
+                    image_array,
+                    self.wd_tagger_settings
+                )
+
+                if self.scene_tags_mode == 'Filtered':
+                    # Use SceneExtractor to filter scene-related tags only
+                    tags_with_probs = list(zip(all_tags, all_probabilities))
+                    scene_tags = self.scene_extractor.extract_scene_tags(
+                        tags_with_probs,
+                        max_tags=self.max_scene_tags
+                    )
+                    logger.info(f"Scene (filtered): {len(scene_tags)} tags: {scene_tags[:10]}...")
+                else:
+                    # Use all tags (non-person tags will naturally emerge)
+                    scene_tags = list(all_tags[:self.max_scene_tags])
+                    logger.info(f"Scene (all): {len(scene_tags)} tags: {scene_tags[:10]}...")
+
+            except Exception as e:
+                logger.error(f"Error extracting scene tags: {e}")
+                scene_tags = []
+
+        # Step 3: Convert tags to natural language using LLM
+        person_descriptions = []
+        settings = get_settings()
+
+        for i, (tags, alias) in enumerate(zip(person_tags_list, person_aliases)):
+            if not tags:
+                person_descriptions.append((alias, "A person in the image."))
+                continue
+
+            try:
+                # Get person prompt template from settings
+                person_prompt_template = settings.value(
+                    'tags_to_caption_person_prompt',
+                    DEFAULT_TAGS_TO_CAPTION_PROMPT,
+                    type=str
+                )
+
+                # Format prompt with tags
+                tags_str = ", ".join(tags)
+                prompt = person_prompt_template.replace('{tags}', tags_str)
+
+                # Generate description using LLM
+                description = self.caption_enhancer._generate_from_prompt(prompt)
+                description = self.clean_vlm_output(description, prompt)
+
+                logger.info(f"Person {i+1} ({alias}): {description}")
+                person_descriptions.append((alias, description))
+
+            except Exception as e:
+                logger.error(f"Failed to convert tags to caption for person {i+1}: {e}")
+                person_descriptions.append((alias, "A person in the image."))
+
+        # Step 4: Convert scene tags to natural language (if present)
+        scene_description = ""
+        if scene_tags:
+            try:
+                scene_prompt_template = settings.value(
+                    'tags_to_caption_scene_prompt',
+                    DEFAULT_SCENE_TAGS_TO_CAPTION_PROMPT,
+                    type=str
+                )
+
+                tags_str = ", ".join(scene_tags)
+                prompt = scene_prompt_template.replace('{tags}', tags_str)
+
+                scene_description = self.caption_enhancer._generate_from_prompt(prompt)
+                scene_description = self.clean_vlm_output(scene_description, prompt)
+
+                logger.info(f"Scene: {scene_description}")
+
+            except Exception as e:
+                logger.error(f"Failed to convert scene tags to caption: {e}")
+                scene_description = ""
+
+        # Step 5: Format output (same as Fine-Tune mode)
+        caption = self._format_fine_tune_output(person_descriptions, scene_description)
+
+        logger.info(f"Generated tags-to-caption with {len(person_descriptions)} people")
+        return caption
+
+    def finalize_batch(self, progress_callback=None) -> list[str]:
+        """
+        Finalize batch processing by enhancing all pending descriptions.
+
+        Called by captioning thread after all images have been processed.
+        Unloads VLM, loads LLM, enhances all pending descriptions.
+
+        Args:
+            progress_callback: Optional callable(current, total) for progress updates
+
+        Returns:
+            List of enhanced captions (one per pending image, in order)
+        """
+        if not self.pending_enhancements:
+            logger.debug("No pending enhancements to finalize")
+            return []
+
+        if self.caption_enhancer is None:
+            logger.debug("No caption enhancer configured")
+            return []
+
+        total_pending = len(self.pending_enhancements)
+        logger.info(f"Finalizing batch: {total_pending} images pending enhancement")
+
+        # Unload VLM to free VRAM
+        logger.info("Unloading VLM before batch enhancement...")
+        self._unload_description_model()
+
+        # Process all pending enhancements
+        enhanced_captions = []
+        for img_idx, pending in enumerate(self.pending_enhancements):
+            vlm_results = pending['vlm_results']
+            scene_description = pending['scene_description']
+
+            logger.info(f"Enhancing image {img_idx + 1}/{len(self.pending_enhancements)}...")
+
+            # Enhance descriptions that need it
+            person_descriptions = []
+            for i, (alias, description, person_tags, coverage, missing_tags) in enumerate(vlm_results):
+                if person_tags is not None and coverage is not None and coverage < self.enhancement_threshold:
+                    logger.info(
+                        f"  Person {i + 1}: Coverage {coverage:.2%} < {self.enhancement_threshold:.2%}, "
+                        "enhancing..."
+                    )
+                    try:
+                        important_tags = self.caption_enhancer._filter_important_tags(person_tags)
+                        enhanced_description = self.caption_enhancer.enhance_description(
+                            original_desc=description,
+                            missing_tags=missing_tags,
+                            coverage=coverage,
+                            all_tags=important_tags
+                        )
+                        logger.debug(f"  Person {i + 1} enhanced: {enhanced_description}")
+                        description = enhanced_description
+                    except Exception as e:
+                        error_msg = str(e)
+                        logger.error(f"  Enhancement failed for person {i + 1}: {error_msg}")
+                        if "CUDA out of memory" in error_msg:
+                            logger.warning("CUDA OOM - skipping remaining enhancements for this batch")
+                            # Add remaining descriptions unenhanced and skip rest of batch
+                            for remaining_alias, remaining_desc, _, _, _ in vlm_results[i:]:
+                                person_descriptions.append((remaining_alias, remaining_desc))
+                            break
+
+                person_descriptions.append((alias, description))
+
+            # Format caption
+            caption = self._format_fine_tune_output(person_descriptions, scene_description)
+            enhanced_captions.append(caption)
+
+            # Report progress
+            if progress_callback is not None:
+                progress_callback(img_idx + 1, total_pending)
+
+        # Clear pending enhancements
+        self.pending_enhancements = []
+
+        # Unload LLM to free VRAM
+        if self.caption_enhancer is not None:
+            logger.info("Unloading LLM after batch enhancement...")
+            self.caption_enhancer.unload_model()
+
+        logger.info(f"Batch enhancement complete: {len(enhanced_captions)} images enhanced")
+        return enhanced_captions

@@ -9,25 +9,35 @@ from auto_captioning.models.llava_next import (LlavaNext34b, LlavaNextMistral,
 from auto_captioning.models.moondream import Moondream1, Moondream2
 from auto_captioning.models.multi_person_tagger import MultiPersonTagger
 from auto_captioning.models.phi_3_vision import Phi3Vision
+from auto_captioning.models.qwen2_vl import Qwen2VL
 from auto_captioning.models.wd_tagger import WdTagger
 
 MODELS = [
     'multi-person-wd-yolo',
-    'fancyfeast/llama-joycaption-beta-one-hf-llava',
-    'microsoft/Florence-2-large-ft',
+    # Stable VLMs (well-tested, no special requirements)
+    'vikhyatk/moondream2',
+    'vikhyatk/moondream1',
+    'microsoft/Florence-2-base',
     'microsoft/Florence-2-large',
     'microsoft/Florence-2-base-ft',
-    'microsoft/Florence-2-base',
-    'MiaoshouAI/Florence-2-large-PromptGen-v2.0',
+    'microsoft/Florence-2-large-ft',
     'MiaoshouAI/Florence-2-base-PromptGen-v2.0',
+    'MiaoshouAI/Florence-2-large-PromptGen-v2.0',
     'microsoft/Phi-3-vision-128k-instruct',
+    'fancyfeast/llama-joycaption-beta-one-hf-llava',
     'llava-hf/llava-v1.6-mistral-7b-hf',
     'llava-hf/llava-v1.6-vicuna-7b-hf',
     'llava-hf/llava-v1.6-vicuna-13b-hf',
     'llava-hf/llava-v1.6-34b-hf',
     'xtuner/llava-llama-3-8b-v1_1-transformers',
-    'vikhyatk/moondream2',
-    'vikhyatk/moondream1',
+    # Modern VLMs (2024-2025) - may require transformers upgrade
+    'HuggingFaceTB/SmolVLM2-2.2B-Instruct',
+    'Qwen/Qwen2.5-VL-3B-Instruct',
+    'Qwen/Qwen2.5-VL-7B-Instruct',
+    'openbmb/MiniCPM-V-2_6',
+    'google/gemma-3-4b-it',
+    'google/gemma-3-12b-it',
+    # WD Taggers
     'SmilingWolf/wd-eva02-large-tagger-v3',
     'SmilingWolf/wd-vit-large-tagger-v3',
     'SmilingWolf/wd-swinv2-tagger-v3',
@@ -38,6 +48,7 @@ MODELS = [
     'SmilingWolf/wd-v1-4-convnext-tagger-v2',
     'SmilingWolf/wd-v1-4-convnextv2-tagger-v2',
     'SmilingWolf/wd-v1-4-vit-tagger-v2',
+    # Legacy VLMs
     'llava-hf/llava-1.5-7b-hf',
     'llava-hf/llava-1.5-13b-hf',
     'llava-hf/bakLlava-v1-hf',
@@ -84,4 +95,14 @@ def get_model_class(model_id: str) -> type[AutoCaptioningModel]:
         return Phi3Vision
     if 'wd' in lowercase_model_id and 'tagger' in lowercase_model_id:
         return WdTagger
+    # Modern VLMs (2024-2025) - use base class with AutoModelForVision2Seq
+    # Note: Some of these may need specific implementations for full functionality
+    if 'smolvlm' in lowercase_model_id:
+        return AutoCaptioningModel
+    if 'qwen' in lowercase_model_id and 'vl' in lowercase_model_id:
+        return Qwen2VL
+    if 'gemma-3' in lowercase_model_id:
+        return AutoCaptioningModel
+    if 'minicpm' in lowercase_model_id:
+        return AutoCaptioningModel
     return AutoCaptioningModel

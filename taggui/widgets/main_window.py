@@ -107,6 +107,9 @@ class MainWindow(QMainWindow):
         self.toggle_all_tags_editor_action = QAction('All Tags', parent=self)
         self.toggle_auto_captioner_action = QAction('Auto-Captioner',
                                                     parent=self)
+        self.reset_layout_action = QAction('Reset Layout', parent=self)
+        self.show_captions_action = QAction('Show Captions Instead of Tags',
+                                            parent=self)
         self.create_menus()
 
         self.image_list_selection_model = (self.image_list.list_view
@@ -371,6 +374,16 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.toggle_image_tags_editor_action)
         view_menu.addAction(self.toggle_all_tags_editor_action)
         view_menu.addAction(self.toggle_auto_captioner_action)
+        view_menu.addSeparator()
+        self.reset_layout_action.triggered.connect(self.reset_layout)
+        view_menu.addAction(self.reset_layout_action)
+        view_menu.addSeparator()
+        self.show_captions_action.setCheckable(True)
+        show_captions = self.settings.value(
+            'show_captions_mode', defaultValue=False, type=bool)
+        self.show_captions_action.setChecked(show_captions)
+        self.show_captions_action.triggered.connect(self.toggle_captions_mode)
+        view_menu.addAction(self.show_captions_action)
 
         help_menu = menu_bar.addMenu('Help')
         open_github_repository_action = QAction('GitHub', parent=self)
@@ -506,6 +519,9 @@ class MainWindow(QMainWindow):
                 self.image_tags_editor.isVisible()))
         self.image_tags_editor.tag_input_box.tags_addition_requested.connect(
             self.image_list_model.add_tags)
+        # Connect caption editing to save
+        self.image_tags_editor.caption_changed.connect(
+            self.image_list_model.update_image_caption)
 
     @Slot()
     def set_image_list_filter_text(self, selected_tag: str):
@@ -589,3 +605,44 @@ class MainWindow(QMainWindow):
                                                       type=str))
             if directory_path.is_dir():
                 self.load_directory(directory_path, select_index=image_index)
+
+    @Slot()
+    def reset_layout(self):
+        """Reset the window layout to default positions."""
+        # Remove saved geometry and window state
+        self.settings.remove('geometry')
+        self.settings.remove('window_state')
+        # Show all dock widgets
+        self.image_list.show()
+        self.image_tags_editor.show()
+        self.all_tags_editor.show()
+        self.auto_captioner.show()
+        # Update toggle actions to reflect visibility
+        self.toggle_image_list_action.setChecked(True)
+        self.toggle_image_tags_editor_action.setChecked(True)
+        self.toggle_all_tags_editor_action.setChecked(True)
+        self.toggle_auto_captioner_action.setChecked(True)
+        # Reset dock widget positions
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.image_list)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.image_tags_editor)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.all_tags_editor)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.auto_captioner)
+        # Tabify the right dock widgets
+        self.tabifyDockWidget(self.image_tags_editor, self.all_tags_editor)
+        self.tabifyDockWidget(self.all_tags_editor, self.auto_captioner)
+        # Raise the image tags editor to the front
+        self.image_tags_editor.raise_()
+        # Maximise window
+        self.showMaximized()
+
+    @Slot()
+    def toggle_captions_mode(self, is_checked: bool):
+        """Toggle between showing captions or tags in lists."""
+        self.settings.setValue('show_captions_mode', is_checked)
+        # Update the image list model to use the new display mode
+        self.image_list_model.set_show_captions_mode(is_checked)
+        # Update the image tags editor view (force=True for global toggle)
+        if is_checked:
+            self.image_tags_editor.switch_to_caption_view(force=True)
+        else:
+            self.image_tags_editor.switch_to_tags_view()

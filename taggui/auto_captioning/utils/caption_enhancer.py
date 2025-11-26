@@ -11,7 +11,41 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from utils.settings import get_settings
+
 logger = logging.getLogger(__name__)
+
+# Default enhancement prompts (used if not customised in settings)
+DEFAULT_LIGHT_ENHANCEMENT_PROMPT = """Rewrite this image caption to add the missing details.
+
+Original: {original_desc}
+Add these details: {missing_tags}
+
+Rules:
+- Maximum 25 words
+- Only describe what is visible
+- No metaphors or flowery language
+- Be factual and direct
+- Do not include any text found in the image
+- Do not include any reference to the prompt in the output or mention attributes
+
+Rewritten caption:"""
+
+DEFAULT_HEAVY_REWRITE_PROMPT = """Write a brief image caption using these detected attributes.
+
+Context: {original_desc}
+Attributes to include: {all_tags}
+
+Rules:
+- Maximum 30 words
+- Only describe what is visible
+- No metaphors, poetry, or flowery language
+- Be factual and direct
+- One or two sentences only
+- Do not include any text found in the image
+- Do not include any reference to the prompt or attributes in the caption, stick to what's visual
+
+Caption:"""
 
 
 class CaptionEnhancer:
@@ -54,7 +88,10 @@ class CaptionEnhancer:
         self,
         model_name: Optional[str] = None,
         device: Optional[str] = None,
-        quantize: bool = True
+        quantize: bool = True,
+        temperature: float = 0.3,
+        top_p: float = 0.9,
+        max_new_tokens: int = 75
     ):
         """
         Initialize the caption enhancer.
@@ -63,9 +100,15 @@ class CaptionEnhancer:
             model_name: HuggingFace model name for LLM (e.g., "Qwen/Qwen2.5-7B-Instruct")
             device: Device to load model on ("cuda" or "cpu"). If None, auto-detect.
             quantize: Whether to use 4-bit quantisation for LLM
+            temperature: Sampling temperature (0.1-2.0, lower = more deterministic)
+            top_p: Nucleus sampling threshold (0.0-1.0)
+            max_new_tokens: Maximum tokens to generate
         """
         self.model_name = model_name
         self.quantize = quantize
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_new_tokens = max_new_tokens
 
         # Auto-detect device if not specified
         if device is None:
@@ -77,7 +120,8 @@ class CaptionEnhancer:
         self.model = None
         self.tokenizer = None
 
-        logger.info(f"CaptionEnhancer initialized (device={self.device}, quantize={quantize})")
+        logger.info(f"CaptionEnhancer initialized (device={self.device}, quantize={quantize}, "
+                    f"temperature={temperature}, top_p={top_p}, max_tokens={max_new_tokens})")
 
     def analyse_coverage(
         self,
@@ -279,20 +323,19 @@ class CaptionEnhancer:
         original_desc: str,
         missing_tags: List[str]
     ) -> str:
-        """Generate prompt for light enhancement mode."""
+        """Generate prompt for light enhancement mode using template from settings."""
+        settings = get_settings()
+        template = settings.value(
+            'enhancement_prompt_light',
+            DEFAULT_LIGHT_ENHANCEMENT_PROMPT,
+            type=str
+        )
+
         missing_tags_str = ", ".join(missing_tags)
 
-        prompt = f"""You are enhancing training captions for AI image generation models.
-
-ORIGINAL DESCRIPTION (from vision analysis):
-{original_desc}
-
-MISSING SPECIFIC DETAILS (from tag analysis):
-{missing_tags_str}
-
-TASK: Rewrite the description in 2-3 sentences to naturally incorporate the missing details while preserving the narrative flow and style of the original. Be specific and detailed but maintain natural language.
-
-Enhanced description:"""
+        # Replace template variables
+        prompt = template.replace('{original_desc}', original_desc)
+        prompt = prompt.replace('{missing_tags}', missing_tags_str)
 
         return prompt
 
@@ -301,28 +344,28 @@ Enhanced description:"""
         original_desc: str,
         all_important_tags: List[str]
     ) -> str:
-        """Generate prompt for heavy rewrite mode."""
+        """Generate prompt for heavy rewrite mode using template from settings."""
+        settings = get_settings()
+        template = settings.value(
+            'enhancement_prompt_heavy',
+            DEFAULT_HEAVY_REWRITE_PROMPT,
+            type=str
+        )
+
         all_tags_str = ", ".join(all_important_tags)
 
-        prompt = f"""You are creating detailed training captions for AI image generation models.
-
-BASIC DESCRIPTION: {original_desc}
-
-ALL DETECTED ATTRIBUTES: {all_tags_str}
-
-TASK: Write a comprehensive 2-3 sentence description that naturally incorporates all the specific attributes listed above. Maintain a flowing, natural style suitable for image generation training data.
-
-Description:"""
+        # Replace template variables
+        prompt = template.replace('{original_desc}', original_desc)
+        prompt = prompt.replace('{all_tags}', all_tags_str)
 
         return prompt
 
-    def _generate_from_prompt(self, prompt: str, max_new_tokens: int = 150) -> str:
+    def _generate_from_prompt(self, prompt: str) -> str:
         """
         Generate text from LLM given a prompt.
 
         Args:
             prompt: Input prompt for the LLM
-            max_new_tokens: Maximum tokens to generate
 
         Returns:
             Generated text
@@ -336,13 +379,13 @@ Description:"""
             max_length=512
         ).to(self.device)
 
-        # Generate
+        # Generate using configured parameters
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=0.7,
-                top_p=0.9,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 do_sample=True,
                 pad_token_id=self.tokenizer.eos_token_id
             )
@@ -370,7 +413,18 @@ Description:"""
             Cleaned text
         """
         # Remove any remaining prompt echoes
-        text = re.sub(r'^(Enhanced description:|Description:)\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^(Enhanced description:|Description:|Rewritten caption:|Caption:)\s*', '', text, flags=re.IGNORECASE)
+
+        # Remove rule explanations that LLMs sometimes add
+        # Pattern: "To meet the rules:" or "Following the rules:" etc.
+        text = re.sub(r'\s*(To meet|Following|According to|Based on|Per) the rules?:?.*$', '', text, flags=re.IGNORECASE | re.DOTALL)
+
+        # Remove numbered rule explanations (e.g., "1. The description..." or "Rule 1:")
+        text = re.sub(r'\s*\d+\.\s*(The description|It only|This|I|No|Be|One|Maximum).*$', '', text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r'\s*Rule \d+:.*$', '', text, flags=re.IGNORECASE | re.DOTALL)
+
+        # Remove "Note:" or "Notes:" explanations
+        text = re.sub(r'\s*Notes?:.*$', '', text, flags=re.IGNORECASE | re.DOTALL)
 
         # Remove trailing incomplete sentences
         sentences = re.split(r'[.!?]\s+', text)

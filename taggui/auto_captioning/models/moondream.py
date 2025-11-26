@@ -9,6 +9,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from auto_captioning.auto_captioning_model import AutoCaptioningModel
 from utils.image import Image
 
+# Use the old revision that works with our code structure.
+# For transformers >= 4.50, we monkey-patch the generate method.
 MOONDREAM2_REVISION = '2024-08-26'
 
 
@@ -24,7 +26,33 @@ class Moondream(AutoCaptioningModel):
         return f'<image>\n\nQuestion: {prompt}\n\nAnswer:'
 
     def get_generation_model(self):
-        return self.model.text_model
+        if not hasattr(self.model, 'text_model'):
+            raise AttributeError(f"Model {type(self.model)} has no 'text_model' attribute.")
+        text_model = self.model.text_model
+
+        # For transformers >= 4.50, PhiForCausalLM no longer inherits generate()
+        # We dynamically add GenerationMixin to the class hierarchy
+        if not hasattr(text_model, 'generate') or not callable(getattr(text_model, 'generate', None)):
+            from transformers import GenerationMixin
+
+            # Dynamically create a new class that inherits from both
+            original_class = text_model.__class__
+            if GenerationMixin not in original_class.__mro__:
+                # Create new class with GenerationMixin
+                new_class = type(
+                    original_class.__name__,
+                    (GenerationMixin, original_class),
+                    {}
+                )
+                # Change the instance's class
+                text_model.__class__ = new_class
+
+        # Ensure generation_config exists (required by transformers >= 4.50)
+        if not hasattr(text_model, 'generation_config') or text_model.generation_config is None:
+            from transformers import GenerationConfig
+            text_model.generation_config = GenerationConfig()
+
+        return text_model
 
     def get_tokenizer(self):
         return self.processor
@@ -94,8 +122,11 @@ class Moondream2(Moondream):
         return None
 
     def get_processor(self):
-        return AutoTokenizer.from_pretrained(self.model_id,
-                                             trust_remote_code=True)
+        return AutoTokenizer.from_pretrained(
+            self.model_id,
+            revision=MOONDREAM2_REVISION,
+            trust_remote_code=True
+        )
 
     def get_model_load_arguments(self) -> dict:
         arguments = super().get_model_load_arguments()

@@ -39,7 +39,8 @@ class ImageMasker:
     def mask_persons(
         self,
         image: PilImage.Image,
-        bboxes: List[Tuple[int, int, int, int]]
+        bboxes: List[Tuple[int, int, int, int]],
+        masks: List[np.ndarray] = None
     ) -> PilImage.Image:
         """
         Mask person regions in the image.
@@ -47,6 +48,8 @@ class ImageMasker:
         Args:
             image: PIL Image to mask
             bboxes: List of bounding boxes (x1, y1, x2, y2) for person regions
+            masks: Optional list of segmentation masks (numpy arrays) for precise masking.
+                   If provided and same length as bboxes, uses masks instead of bboxes.
 
         Returns:
             Masked PIL Image with person regions obscured
@@ -61,10 +64,22 @@ class ImageMasker:
 
         masked_image = image.copy()
 
-        if self.strategy == "median":
-            masked_image = self._mask_with_median(masked_image, bboxes)
-        elif self.strategy == "blur":
-            masked_image = self._mask_with_blur(masked_image, bboxes)
+        # Use segmentation masks if available for all detections
+        use_masks = masks is not None and len(masks) == len(bboxes) and all(m is not None for m in masks)
+
+        if use_masks:
+            logger.debug(f"Using segmentation masks for precise masking")
+            if self.strategy == "median":
+                masked_image = self._mask_with_median_segmented(masked_image, masks)
+            elif self.strategy == "blur":
+                masked_image = self._mask_with_blur_segmented(masked_image, masks)
+        else:
+            if masks is not None:
+                logger.debug(f"Falling back to bounding boxes (masks incomplete: {len(masks) if masks else 0}/{len(bboxes)})")
+            if self.strategy == "median":
+                masked_image = self._mask_with_median(masked_image, bboxes)
+            elif self.strategy == "blur":
+                masked_image = self._mask_with_blur(masked_image, bboxes)
 
         logger.debug(f"Masked {len(bboxes)} person regions using {self.strategy} strategy")
         return masked_image
@@ -143,6 +158,91 @@ class ImageMasker:
         # Composite: use blurred version where mask is white, original where black
         masked_image = PilImage.composite(blurred, image, mask_img)
 
+        return masked_image
+
+    def _mask_with_median_segmented(
+        self,
+        image: PilImage.Image,
+        masks: List[np.ndarray]
+    ) -> PilImage.Image:
+        """
+        Mask person regions using segmentation masks by filling with median background colour.
+
+        Args:
+            image: PIL Image to mask
+            masks: List of binary segmentation masks (numpy arrays)
+
+        Returns:
+            Masked image
+        """
+        img_array = np.array(image)
+        height, width = img_array.shape[:2]
+
+        # Create combined mask of all person regions from segmentation masks
+        person_mask = np.zeros((height, width), dtype=bool)
+        for mask in masks:
+            if mask is not None and mask.shape[:2] == (height, width):
+                # Handle both boolean and uint8 masks
+                if mask.dtype == bool:
+                    person_mask |= mask
+                else:
+                    person_mask |= (mask > 0)
+
+        # Calculate median colour of background (non-person) regions
+        if not person_mask.all():  # Check there are some background pixels
+            background_pixels = img_array[~person_mask]
+            if len(background_pixels) > 0:
+                median_colour = np.median(background_pixels, axis=0).astype(np.uint8)
+            else:
+                median_colour = np.array([128, 128, 128], dtype=np.uint8)
+        else:
+            median_colour = np.array([128, 128, 128], dtype=np.uint8)
+
+        # Fill person regions with median colour
+        img_array[person_mask] = median_colour
+
+        logger.debug(f"Applied median masking using segmentation masks ({person_mask.sum()} pixels masked)")
+        return PilImage.fromarray(img_array)
+
+    def _mask_with_blur_segmented(
+        self,
+        image: PilImage.Image,
+        masks: List[np.ndarray]
+    ) -> PilImage.Image:
+        """
+        Mask person regions using segmentation masks by applying Gaussian blur.
+
+        Args:
+            image: PIL Image to mask
+            masks: List of binary segmentation masks (numpy arrays)
+
+        Returns:
+            Masked image
+        """
+        height, width = image.size[1], image.size[0]
+
+        # Create combined mask from segmentation masks
+        combined_mask = np.zeros((height, width), dtype=np.uint8)
+        for mask in masks:
+            if mask is not None and mask.shape[:2] == (height, width):
+                if mask.dtype == bool:
+                    combined_mask[mask] = 255
+                else:
+                    combined_mask[mask > 0] = 255
+
+        # Create a heavily blurred version of the entire image
+        blurred = image.filter(ImageFilter.GaussianBlur(radius=20))
+
+        # Convert mask to PIL Image
+        mask_img = PilImage.fromarray(combined_mask, mode='L')
+
+        # Smooth the mask edges for better blending
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=5))
+
+        # Composite: use blurred version where mask is white, original where black
+        masked_image = PilImage.composite(blurred, image, mask_img)
+
+        logger.debug(f"Applied blur masking using segmentation masks ({combined_mask.sum() // 255} pixels masked)")
         return masked_image
 
     def validate_mask_quality(

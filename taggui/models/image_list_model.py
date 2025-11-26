@@ -139,9 +139,26 @@ class ImageListModel(QAbstractListModel):
         self.redo_stack = []
         self.proxy_image_list_model = None
         self.image_list_selection_model = None
+        # When True, show captions instead of tags in the image list
+        settings = get_settings()
+        self.show_captions_mode = settings.value(
+            'show_captions_mode', defaultValue=False, type=bool)
 
     def rowCount(self, parent=None) -> int:
         return len(self.images)
+
+    def set_show_captions_mode(self, enabled: bool):
+        """Set whether to show captions instead of tags in the image list."""
+        if self.show_captions_mode == enabled:
+            return
+        self.show_captions_mode = enabled
+        # Notify views that all display data may have changed
+        if self.images:
+            self.dataChanged.emit(
+                self.index(0),
+                self.index(len(self.images) - 1),
+                [Qt.ItemDataRole.DisplayRole]
+            )
 
     def data(self, index, role=None) -> Image | str | QIcon | QSize:
         image = self.images[index.row()]
@@ -150,9 +167,15 @@ class ImageListModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             # The text shown next to the thumbnail in the image list.
             text = image.path.name
-            if image.tags:
-                caption = self.tag_separator.join(image.tags)
-                text += f'\n{caption}'
+            if self.show_captions_mode:
+                # Show caption instead of tags
+                if image.caption:
+                    text += f'\n{image.caption}'
+            else:
+                # Show tags
+                if image.tags:
+                    caption = self.tag_separator.join(image.tags)
+                    text += f'\n{caption}'
             return text
         if role == Qt.ItemDataRole.DecorationRole:
             # The thumbnail. If the image already has a thumbnail stored, use

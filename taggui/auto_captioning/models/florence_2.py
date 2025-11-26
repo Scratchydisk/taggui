@@ -17,6 +17,12 @@ class Florence2(AutoCaptioningModel):
     ]
     default_prompt = task_prompts[2]
 
+    def get_model_load_arguments(self) -> dict:
+        arguments = super().get_model_load_arguments()
+        # Force eager attention to avoid SDPA compatibility issues with transformers 4.50+
+        arguments['attn_implementation'] = 'eager'
+        return arguments
+
     def get_additional_error_message(self) -> str | None:
         if self.prompt and self.prompt not in self.task_prompts:
             quoted_task_prompts = [f'"{task_prompt}"'
@@ -28,8 +34,9 @@ class Florence2(AutoCaptioningModel):
             return 'This model does not support `Start caption with`.'
         return None
 
-    def get_default_prompt(self) -> str:
-        return self.default_prompt
+    @classmethod
+    def get_default_prompt(cls) -> str:
+        return cls.default_prompt
 
 
 class Florence2Promptgen(Florence2):
